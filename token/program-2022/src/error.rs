@@ -258,6 +258,17 @@ pub enum TokenError {
     /// Fee calculation failed
     #[error("Fee calculation failed")]
     FeeCalculation,
+
+    //65
+    /// Withdraw / Deposit not allowed for confidential-mint-burn
+    #[error("Withdraw / Deposit not allowed for confidential-mint-burn")]
+    IllegalMintBurnConversion,
+    /// Invalid scale for scaled ui amount
+    #[error("Invalid scale for scaled ui amount")]
+    InvalidScale,
+    /// Transferring, minting, and burning is paused on this mint
+    #[error("Transferring, minting, and burning is paused on this mint")]
+    MintPaused,
 }
 impl From<TokenError> for ProgramError {
     fn from(e: TokenError) -> Self {
@@ -445,6 +456,15 @@ impl PrintProgramError for TokenError {
             TokenError::FeeCalculation => {
                 msg!("Transfer fee calculation failed")
             }
+            TokenError::IllegalMintBurnConversion => {
+                msg!("Conversions from normal to confidential token balance and vice versa are illegal if the confidential-mint-burn extension is enabled")
+            }
+            TokenError::InvalidScale => {
+                msg!("Invalid scale for scaled ui amount")
+            }
+            TokenError::MintPaused => {
+                msg!("Transferring, minting, and burning is paused on this mint")
+            }
         }
     }
 }
@@ -457,6 +477,7 @@ impl From<TokenProofGenerationError> for TokenError {
             TokenProofGenerationError::NotEnoughFunds => TokenError::InsufficientFunds,
             TokenProofGenerationError::IllegalAmountBitLength => TokenError::IllegalBitLength,
             TokenProofGenerationError::FeeCalculation => TokenError::FeeCalculation,
+            TokenProofGenerationError::CiphertextExtraction => TokenError::MalformedCiphertext,
         }
     }
 }

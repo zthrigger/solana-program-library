@@ -3,7 +3,7 @@ pub use solana_zk_sdk::zk_elgamal_proof_program::{
 };
 #[cfg(feature = "serde-traits")]
 use {
-    crate::serialization::aeciphertext_fromstr,
+    crate::serialization::{aeciphertext_fromstr, elgamalciphertext_fromstr},
     serde::{Deserialize, Serialize},
 };
 use {
@@ -102,8 +102,8 @@ pub enum ConfidentialTransferInstruction {
     ///   3. `[]` (Optional) Record account if the accompanying proof is to be
     ///      read from a record account.
     ///   4. `[]` The multisig source account owner.
-    ///   5.. `[signer]` Required M signer accounts for the SPL Token Multisig
-    /// account.
+    ///   5. .. `[signer]` Required M signer accounts for the SPL Token Multisig
+    ///      account.
     ///
     /// Data expected by this instruction:
     ///   `ConfigureAccountInstructionData`
@@ -166,8 +166,8 @@ pub enum ConfidentialTransferInstruction {
     ///   2. `[]` (Optional) Record account if the accompanying proof is to be
     ///      read from a record account.
     ///   3. `[]` The multisig account owner.
-    ///   4.. `[signer]` Required M signer accounts for the SPL Token Multisig
-    /// account.
+    ///   4. .. `[signer]` Required M signer accounts for the SPL Token Multisig
+    ///      account.
     ///
     /// Data expected by this instruction:
     ///   `EmptyAccountInstructionData`
@@ -182,6 +182,8 @@ pub enum ConfidentialTransferInstruction {
     ///
     /// Fails if the source or destination accounts are frozen.
     /// Fails if the associated mint is extended as `NonTransferable`.
+    /// Fails if the associated mint is extended as `ConfidentialMintBurn`.
+    /// Fails if the associated mint is paused with the `Pausable` extension.
     ///
     /// Accounts expected by this instruction:
     ///
@@ -194,8 +196,8 @@ pub enum ConfidentialTransferInstruction {
     ///   0. `[writable]` The SPL Token account.
     ///   1. `[]` The token mint.
     ///   2. `[]` The multisig account owner or delegate.
-    ///   3.. `[signer]` Required M signer accounts for the SPL Token Multisig
-    /// account.
+    ///   3. .. `[signer]` Required M signer accounts for the SPL Token Multisig
+    ///      account.
     ///
     /// Data expected by this instruction:
     ///   `DepositInstructionData`
@@ -207,14 +209,18 @@ pub enum ConfidentialTransferInstruction {
     /// In order for this instruction to be successfully processed, it must be
     /// accompanied by the following list of `zk_elgamal_proof` program
     /// instructions:
+    ///
     /// - `VerifyCiphertextCommitmentEquality`
     /// - `VerifyBatchedRangeProofU64`
+    ///
     /// These instructions can be accompanied in the same transaction or can be
     /// pre-verified into a context state account, in which case, only their
     /// context state account address need to be provided.
     ///
     /// Fails if the source or destination accounts are frozen.
     /// Fails if the associated mint is extended as `NonTransferable`.
+    /// Fails if the associated mint is extended as `ConfidentialMintBurn`.
+    /// Fails if the associated mint is paused with the `Pausable` extension.
     ///
     /// Accounts expected by this instruction:
     ///
@@ -241,8 +247,8 @@ pub enum ConfidentialTransferInstruction {
     ///   4. `[]` (Optional) Range proof record account or context state
     ///      account.
     ///   5. `[]` The multisig  source account owner.
-    ///   6.. `[signer]` Required M signer accounts for the SPL Token Multisig
-    /// account.
+    ///   6. .. `[signer]` Required M signer accounts for the SPL Token Multisig
+    ///      account.
     ///
     /// Data expected by this instruction:
     ///   `WithdrawInstructionData`
@@ -253,9 +259,11 @@ pub enum ConfidentialTransferInstruction {
     /// In order for this instruction to be successfully processed, it must be
     /// accompanied by the following list of `zk_elgamal_proof` program
     /// instructions:
+    ///
     /// - `VerifyCiphertextCommitmentEquality`
     /// - `VerifyBatchedGroupedCiphertext3HandlesValidity`
     /// - `VerifyBatchedRangeProofU128`
+    ///
     /// These instructions can be accompanied in the same transaction or can be
     /// pre-verified into a context state account, in which case, only their
     /// context state account addresses need to be provided.
@@ -291,8 +299,8 @@ pub enum ConfidentialTransferInstruction {
     ///   7. `[]` (Optional) Range proof record account or context state
     ///      account.
     ///   8. `[]` The multisig  source account owner.
-    ///   9.. `[signer]` Required M signer accounts for the SPL Token Multisig
-    /// account.
+    ///   9. .. `[signer]` Required M signer accounts for the SPL Token Multisig
+    ///      account.
     ///
     /// Data expected by this instruction:
     ///   `TransferInstructionData`
@@ -319,8 +327,8 @@ pub enum ConfidentialTransferInstruction {
     ///   * Multisignature owner/delegate
     ///   0. `[writable]` The SPL Token account.
     ///   1. `[]` The multisig account owner.
-    ///   2.. `[signer]` Required M signer accounts for the SPL Token Multisig
-    /// account.
+    ///   2. .. `[signer]` Required M signer accounts for the SPL Token Multisig
+    ///      account.
     ///
     /// Data expected by this instruction:
     ///   `ApplyPendingBalanceData`
@@ -338,8 +346,8 @@ pub enum ConfidentialTransferInstruction {
     ///   * Multisignature owner/delegate
     ///   0. `[writable]` The SPL Token account.
     ///   1. `[]` Multisig authority.
-    ///   2.. `[signer]` Required M signer accounts for the SPL Token Multisig
-    /// account.
+    ///   2. .. `[signer]` Required M signer accounts for the SPL Token Multisig
+    ///      account.
     ///
     /// Data expected by this instruction:
     ///   None
@@ -363,8 +371,8 @@ pub enum ConfidentialTransferInstruction {
     ///   * Multisignature owner/delegate
     ///   0. `[writable]` The SPL Token account.
     ///   1. `[]` The multisig account owner.
-    ///   2.. `[signer]` Required M signer accounts for the SPL Token Multisig
-    /// account.
+    ///   2. .. `[signer]` Required M signer accounts for the SPL Token Multisig
+    ///      account.
     ///
     /// Data expected by this instruction:
     ///   None
@@ -382,8 +390,8 @@ pub enum ConfidentialTransferInstruction {
     ///   * Multisignature owner/delegate
     ///   0. `[writable]` The SPL Token account.
     ///   1. `[]` The multisig account owner.
-    ///   2.. `[signer]` Required M signer accounts for the SPL Token Multisig
-    /// account.
+    ///   2. .. `[signer]` Required M signer accounts for the SPL Token Multisig
+    ///      account.
     ///
     /// Data expected by this instruction:
     ///   None
@@ -404,8 +412,8 @@ pub enum ConfidentialTransferInstruction {
     ///   * Multisignature owner/delegate
     ///   0. `[writable]` The SPL Token account.
     ///   1. `[]` The multisig account owner.
-    ///   2.. `[signer]` Required M signer accounts for the SPL Token Multisig
-    /// account.
+    ///   2. .. `[signer]` Required M signer accounts for the SPL Token Multisig
+    ///      account.
     ///
     /// Data expected by this instruction:
     ///   None
@@ -416,12 +424,14 @@ pub enum ConfidentialTransferInstruction {
     /// In order for this instruction to be successfully processed, it must be
     /// accompanied by the following list of `zk_elgamal_proof` program
     /// instructions:
+    ///
     /// - `VerifyCiphertextCommitmentEquality`
     /// - `VerifyBatchedGroupedCiphertext3HandlesValidity` (transfer amount
     ///   ciphertext)
     /// - `VerifyPercentageWithFee`
     /// - `VerifyBatchedGroupedCiphertext2HandlesValidity` (fee ciphertext)
     /// - `VerifyBatchedRangeProofU256`
+    ///
     /// These instructions can be accompanied in the same transaction or can be
     /// pre-verified into a context state account, in which case, only their
     /// context state account addresses need to be provided.
@@ -467,7 +477,8 @@ pub enum ConfidentialTransferInstruction {
     ///   9. `[]` (Optional) Range proof record account or context state
     ///      account.
     ///   10. `[]` The multisig  source account owner.
-    ///   11.. `[signer]` Required M signer accounts for the SPL Token Multisig
+    ///   11. .. `[signer]` Required M signer accounts for the SPL Token
+    ///       Multisig
     ///
     /// Data expected by this instruction:
     ///   `TransferWithFeeInstructionData`
@@ -485,7 +496,7 @@ pub enum ConfidentialTransferInstruction {
     /// validity proof as well as the token owner signature.
     ///
     /// If the token account is not large enough to include the new
-    /// cconfidential transfer extension, then optionally reallocate the
+    /// confidential transfer extension, then optionally reallocate the
     /// account to increase the data size. To reallocate, a payer account to
     /// fund the reallocation and the system account should be included in the
     /// instruction.
@@ -610,6 +621,12 @@ pub struct TransferInstructionData {
     /// The new source decryptable balance if the transfer succeeds
     #[cfg_attr(feature = "serde-traits", serde(with = "aeciphertext_fromstr"))]
     pub new_source_decryptable_available_balance: DecryptableBalance,
+    /// The transfer amount encrypted under the auditor ElGamal public key
+    #[cfg_attr(feature = "serde-traits", serde(with = "elgamalciphertext_fromstr"))]
+    pub transfer_amount_auditor_ciphertext_lo: PodElGamalCiphertext,
+    /// The transfer amount encrypted under the auditor ElGamal public key
+    #[cfg_attr(feature = "serde-traits", serde(with = "elgamalciphertext_fromstr"))]
+    pub transfer_amount_auditor_ciphertext_hi: PodElGamalCiphertext,
     /// Relative location of the
     /// `ProofInstruction::VerifyCiphertextCommitmentEquality` instruction
     /// to the `Transfer` instruction in the transaction. If the offset is
@@ -649,6 +666,12 @@ pub struct TransferWithFeeInstructionData {
     /// The new source decryptable balance if the transfer succeeds
     #[cfg_attr(feature = "serde-traits", serde(with = "aeciphertext_fromstr"))]
     pub new_source_decryptable_available_balance: DecryptableBalance,
+    /// The transfer amount encrypted under the auditor ElGamal public key
+    #[cfg_attr(feature = "serde-traits", serde(with = "elgamalciphertext_fromstr"))]
+    pub transfer_amount_auditor_ciphertext_lo: PodElGamalCiphertext,
+    /// The transfer amount encrypted under the auditor ElGamal public key
+    #[cfg_attr(feature = "serde-traits", serde(with = "elgamalciphertext_fromstr"))]
+    pub transfer_amount_auditor_ciphertext_hi: PodElGamalCiphertext,
     /// Relative location of the
     /// `ProofInstruction::VerifyCiphertextCommitmentEquality` instruction
     /// to the `TransferWithFee` instruction in the transaction. If the offset
@@ -1142,6 +1165,8 @@ pub fn inner_transfer(
     mint: &Pubkey,
     destination_token_account: &Pubkey,
     new_source_decryptable_available_balance: DecryptableBalance,
+    transfer_amount_auditor_ciphertext_lo: &PodElGamalCiphertext,
+    transfer_amount_auditor_ciphertext_hi: &PodElGamalCiphertext,
     authority: &Pubkey,
     multisig_signers: &[&Pubkey],
     equality_proof_data_location: ProofLocation<CiphertextCommitmentEqualityProofData>,
@@ -1222,6 +1247,8 @@ pub fn inner_transfer(
         ConfidentialTransferInstruction::Transfer,
         &TransferInstructionData {
             new_source_decryptable_available_balance,
+            transfer_amount_auditor_ciphertext_lo: *transfer_amount_auditor_ciphertext_lo,
+            transfer_amount_auditor_ciphertext_hi: *transfer_amount_auditor_ciphertext_hi,
             equality_proof_instruction_offset,
             ciphertext_validity_proof_instruction_offset,
             range_proof_instruction_offset,
@@ -1237,6 +1264,8 @@ pub fn transfer(
     mint: &Pubkey,
     destination_token_account: &Pubkey,
     new_source_decryptable_available_balance: DecryptableBalance,
+    transfer_amount_auditor_ciphertext_lo: &PodElGamalCiphertext,
+    transfer_amount_auditor_ciphertext_hi: &PodElGamalCiphertext,
     authority: &Pubkey,
     multisig_signers: &[&Pubkey],
     equality_proof_data_location: ProofLocation<CiphertextCommitmentEqualityProofData>,
@@ -1251,6 +1280,8 @@ pub fn transfer(
         mint,
         destination_token_account,
         new_source_decryptable_available_balance,
+        transfer_amount_auditor_ciphertext_lo,
+        transfer_amount_auditor_ciphertext_hi,
         authority,
         multisig_signers,
         equality_proof_data_location,
@@ -1475,6 +1506,8 @@ pub fn inner_transfer_with_fee(
     mint: &Pubkey,
     destination_token_account: &Pubkey,
     new_source_decryptable_available_balance: DecryptableBalance,
+    transfer_amount_auditor_ciphertext_lo: &PodElGamalCiphertext,
+    transfer_amount_auditor_ciphertext_hi: &PodElGamalCiphertext,
     authority: &Pubkey,
     multisig_signers: &[&Pubkey],
     equality_proof_data_location: ProofLocation<CiphertextCommitmentEqualityProofData>,
@@ -1588,6 +1621,8 @@ pub fn inner_transfer_with_fee(
         ConfidentialTransferInstruction::TransferWithFee,
         &TransferWithFeeInstructionData {
             new_source_decryptable_available_balance,
+            transfer_amount_auditor_ciphertext_lo: *transfer_amount_auditor_ciphertext_lo,
+            transfer_amount_auditor_ciphertext_hi: *transfer_amount_auditor_ciphertext_hi,
             equality_proof_instruction_offset,
             transfer_amount_ciphertext_validity_proof_instruction_offset,
             fee_sigma_proof_instruction_offset,
@@ -1605,6 +1640,8 @@ pub fn transfer_with_fee(
     mint: &Pubkey,
     destination_token_account: &Pubkey,
     new_source_decryptable_available_balance: DecryptableBalance,
+    transfer_amount_auditor_ciphertext_lo: &PodElGamalCiphertext,
+    transfer_amount_auditor_ciphertext_hi: &PodElGamalCiphertext,
     authority: &Pubkey,
     multisig_signers: &[&Pubkey],
     equality_proof_data_location: ProofLocation<CiphertextCommitmentEqualityProofData>,
@@ -1623,6 +1660,8 @@ pub fn transfer_with_fee(
         mint,
         destination_token_account,
         new_source_decryptable_available_balance,
+        transfer_amount_auditor_ciphertext_lo,
+        transfer_amount_auditor_ciphertext_hi,
         authority,
         multisig_signers,
         equality_proof_data_location,

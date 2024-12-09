@@ -1,8 +1,12 @@
 use {
     curve25519_dalek::scalar::Scalar,
-    solana_zk_sdk::encryption::{
-        elgamal::ElGamalCiphertext,
-        pedersen::{PedersenCommitment, PedersenOpening},
+    solana_zk_sdk::{
+        encryption::{
+            elgamal::ElGamalCiphertext,
+            pedersen::{PedersenCommitment, PedersenOpening},
+            pod::elgamal::PodElGamalCiphertext,
+        },
+        zk_elgamal_proof_program::proof_data::BatchedGroupedCiphertext3HandlesValidityProofData,
     },
 };
 
@@ -22,8 +26,8 @@ pub const TRANSFER_AMOUNT_HI_BITS: usize = 32;
 pub const REMAINING_BALANCE_BIT_LENGTH: usize = 64;
 
 /// Takes in a 64-bit number `amount` and a bit length `bit_length`. It returns:
-/// - the `bit_length` low bits of `amount` interpretted as u64
-/// - the `(64 - bit_length)` high bits of `amount` interpretted as u64
+/// - the `bit_length` low bits of `amount` interpreted as `u64`
+/// - the `(64 - bit_length)` high bits of `amount` interpreted as `u64`
 pub fn try_split_u64(amount: u64, bit_length: usize) -> Option<(u64, u64)> {
     match bit_length {
         0 => Some((0, amount)),
@@ -41,7 +45,7 @@ pub fn try_split_u64(amount: u64, bit_length: usize) -> Option<(u64, u64)> {
     }
 }
 
-/// Combine two numbers that are interpretted as the low and high bits of a
+/// Combine two numbers that are interpreted as the low and high bits of a
 /// target number. The `bit_length` parameter specifies the number of bits that
 /// `amount_hi` is to be shifted by.
 pub fn try_combine_lo_hi_u64(amount_lo: u64, amount_hi: u64, bit_length: usize) -> Option<u64> {
@@ -86,4 +90,19 @@ pub fn try_combine_lo_hi_openings(
 ) -> Option<PedersenOpening> {
     let two_power = 1_u64.checked_shl(bit_length as u32)?;
     Some(opening_lo + opening_hi * Scalar::from(two_power))
+}
+
+/// A type that wraps a ciphertext validity proof along with two `lo` and `hi`
+/// ciphertexts.
+///
+/// Ciphertext validity proof data contains grouped ElGamal ciphertexts (`lo`
+/// and `hi`) and a proof containing the validity of these ciphertexts. Token
+/// client-side logic often requires a function to extract specific forms of
+/// the grouped ElGamal ciphertexts. This type is a convenience type that
+/// contains the proof data and the extracted ciphertexts.
+#[derive(Clone, Copy)]
+pub struct CiphertextValidityProofWithAuditorCiphertext {
+    pub proof_data: BatchedGroupedCiphertext3HandlesValidityProofData,
+    pub ciphertext_lo: PodElGamalCiphertext,
+    pub ciphertext_hi: PodElGamalCiphertext,
 }

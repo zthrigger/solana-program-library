@@ -23,8 +23,12 @@ mod entrypoint;
 
 // Export current sdk types for downstream users building with a different sdk
 // version
-use solana_program::{
-    entrypoint::ProgramResult, program_error::ProgramError, pubkey::Pubkey, system_program,
+use {
+    error::TokenError,
+    solana_program::{
+        entrypoint::ProgramResult, program_error::ProgramError, pubkey::Pubkey, system_program,
+    },
+    solana_zk_sdk::encryption::pod::elgamal::PodElGamalCiphertext,
 };
 pub use {solana_program, solana_zk_sdk};
 
@@ -58,12 +62,17 @@ pub fn amount_to_ui_amount_string(amount: u64, decimals: u8) -> String {
 /// Convert a raw amount to its UI representation using the given decimals field
 /// Excess zeroes or unneeded decimal point are trimmed.
 pub fn amount_to_ui_amount_string_trimmed(amount: u64, decimals: u8) -> String {
-    let mut s = amount_to_ui_amount_string(amount, decimals);
+    let s = amount_to_ui_amount_string(amount, decimals);
+    trim_ui_amount_string(s, decimals)
+}
+
+/// Trims a string number by removing excess zeroes or unneeded decimal point
+fn trim_ui_amount_string(mut ui_amount: String, decimals: u8) -> String {
     if decimals > 0 {
-        let zeros_trimmed = s.trim_end_matches('0');
-        s = zeros_trimmed.trim_end_matches('.').to_string();
+        let zeros_trimmed = ui_amount.trim_end_matches('0');
+        ui_amount = zeros_trimmed.trim_end_matches('.').to_string();
     }
-    s
+    ui_amount
 }
 
 /// Try to convert a UI representation of a token amount to its raw amount using
@@ -122,7 +131,7 @@ pub fn check_zk_elgamal_proof_program_account(
     Ok(())
 }
 
-/// Checks if the spplied program ID is that of the system program
+/// Checks if the supplied program ID is that of the system program
 pub fn check_system_program_account(system_program_id: &Pubkey) -> ProgramResult {
     if system_program_id != &system_program::id() {
         return Err(ProgramError::IncorrectProgramId);
@@ -136,6 +145,23 @@ pub(crate) fn check_elgamal_registry_program_account(
 ) -> ProgramResult {
     if elgamal_registry_account_program_id != &spl_elgamal_registry::id() {
         return Err(ProgramError::IncorrectProgramId);
+    }
+    Ok(())
+}
+
+/// Check instruction data and proof data auditor ciphertext consistency
+#[cfg(feature = "zk-ops")]
+pub(crate) fn check_auditor_ciphertext(
+    instruction_data_auditor_ciphertext_lo: &PodElGamalCiphertext,
+    instruction_data_auditor_ciphertext_hi: &PodElGamalCiphertext,
+    proof_context_auditor_ciphertext_lo: &PodElGamalCiphertext,
+    proof_context_auditor_ciphertext_hi: &PodElGamalCiphertext,
+) -> ProgramResult {
+    if instruction_data_auditor_ciphertext_lo != proof_context_auditor_ciphertext_lo {
+        return Err(TokenError::ConfidentialTransferBalanceMismatch.into());
+    }
+    if instruction_data_auditor_ciphertext_hi != proof_context_auditor_ciphertext_hi {
+        return Err(TokenError::ConfidentialTransferBalanceMismatch.into());
     }
     Ok(())
 }

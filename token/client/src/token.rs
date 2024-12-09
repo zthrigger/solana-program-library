@@ -43,15 +43,16 @@ use {
                 ConfidentialTransferFeeConfig,
             },
             cpi_guard, default_account_state, group_member_pointer, group_pointer,
-            interest_bearing_mint, memo_transfer, metadata_pointer, transfer_fee, transfer_hook,
-            BaseStateWithExtensions, Extension, ExtensionType, StateWithExtensionsOwned,
+            interest_bearing_mint, memo_transfer, metadata_pointer, pausable, scaled_ui_amount,
+            transfer_fee, transfer_hook, BaseStateWithExtensions, Extension, ExtensionType,
+            StateWithExtensionsOwned,
         },
         instruction, offchain,
         solana_zk_sdk::{
             encryption::{
                 auth_encryption::AeKey,
                 elgamal::{ElGamalCiphertext, ElGamalKeypair, ElGamalPubkey, ElGamalSecretKey},
-                pod::elgamal::PodElGamalPubkey,
+                pod::elgamal::{PodElGamalCiphertext, PodElGamalPubkey},
             },
             zk_elgamal_proof_program::{
                 self,
@@ -188,6 +189,13 @@ pub enum ExtensionInitializationParams {
         authority: Option<Pubkey>,
         member_address: Option<Pubkey>,
     },
+    ScaledUiAmountConfig {
+        authority: Option<Pubkey>,
+        multiplier: f64,
+    },
+    PausableConfig {
+        authority: Pubkey,
+    },
 }
 impl ExtensionInitializationParams {
     /// Get the extension type associated with the init params
@@ -207,6 +215,8 @@ impl ExtensionInitializationParams {
             }
             Self::GroupPointer { .. } => ExtensionType::GroupPointer,
             Self::GroupMemberPointer { .. } => ExtensionType::GroupMemberPointer,
+            Self::ScaledUiAmountConfig { .. } => ExtensionType::ScaledUiAmount,
+            Self::PausableConfig { .. } => ExtensionType::Pausable,
         }
     }
     /// Generate an appropriate initialization instruction for the given mint
@@ -316,6 +326,18 @@ impl ExtensionInitializationParams {
                 authority,
                 member_address,
             ),
+            Self::ScaledUiAmountConfig {
+                authority,
+                multiplier,
+            } => scaled_ui_amount::instruction::initialize(
+                token_program_id,
+                mint,
+                authority,
+                multiplier,
+            ),
+            Self::PausableConfig { authority } => {
+                pausable::instruction::initialize(token_program_id, mint, &authority)
+            }
         }
     }
 }
@@ -346,6 +368,12 @@ pub enum ComputeUnitLimit {
 pub enum ProofAccount {
     ContextAccount(Pubkey),
     RecordAccount(Pubkey, u32),
+}
+
+pub struct ProofAccountWithCiphertext {
+    pub proof_account: ProofAccount,
+    pub ciphertext_lo: PodElGamalCiphertext,
+    pub ciphertext_hi: PodElGamalCiphertext,
 }
 
 pub struct Token<T> {
@@ -895,7 +923,7 @@ where
         mint_result
     }
 
-    /// Retrive mint information.
+    /// Retrieve mint information.
     pub async fn get_mint_info(&self) -> TokenResult<StateWithExtensionsOwned<Mint>> {
         let account = self.get_account(self.pubkey).await?;
         self.unpack_mint_info(account)
@@ -1663,7 +1691,7 @@ where
     }
 
     /// Reallocate a token account to be large enough for a set of
-    /// ExtensionTypes
+    /// `ExtensionType`s
     pub async fn reallocate<S: Signers>(
         &self,
         account: &Pubkey,
@@ -1724,6 +1752,48 @@ where
             &[memo_transfer::instruction::disable_required_transfer_memos(
                 &self.program_id,
                 account,
+                authority,
+                &multisig_signers,
+            )?],
+            signing_keypairs,
+        )
+        .await
+    }
+
+    /// Pause transferring, minting, and burning on the mint
+    pub async fn pause<S: Signers>(
+        &self,
+        authority: &Pubkey,
+        signing_keypairs: &S,
+    ) -> TokenResult<T::Output> {
+        let signing_pubkeys = signing_keypairs.pubkeys();
+        let multisig_signers = self.get_multisig_signers(authority, &signing_pubkeys);
+
+        self.process_ixs(
+            &[pausable::instruction::pause(
+                &self.program_id,
+                self.get_address(),
+                authority,
+                &multisig_signers,
+            )?],
+            signing_keypairs,
+        )
+        .await
+    }
+
+    /// Resume transferring, minting, and burning on the mint
+    pub async fn resume<S: Signers>(
+        &self,
+        authority: &Pubkey,
+        signing_keypairs: &S,
+    ) -> TokenResult<T::Output> {
+        let signing_pubkeys = signing_keypairs.pubkeys();
+        let multisig_signers = self.get_multisig_signers(authority, &signing_pubkeys);
+
+        self.process_ixs(
+            &[pausable::instruction::resume(
+                &self.program_id,
+                self.get_address(),
                 authority,
                 &multisig_signers,
             )?],
@@ -1793,6 +1863,31 @@ where
                 authority,
                 &multisig_signers,
                 new_rate,
+            )?],
+            signing_keypairs,
+        )
+        .await
+    }
+
+    /// Update multiplier
+    pub async fn update_multiplier<S: Signers>(
+        &self,
+        authority: &Pubkey,
+        new_multiplier: f64,
+        new_multiplier_effective_timestamp: i64,
+        signing_keypairs: &S,
+    ) -> TokenResult<T::Output> {
+        let signing_pubkeys = signing_keypairs.pubkeys();
+        let multisig_signers = self.get_multisig_signers(authority, &signing_pubkeys);
+
+        self.process_ixs(
+            &[scaled_ui_amount::instruction::update_multiplier(
+                &self.program_id,
+                self.get_address(),
+                authority,
+                &multisig_signers,
+                new_multiplier,
+                new_multiplier_effective_timestamp,
             )?],
             signing_keypairs,
         )
@@ -2198,7 +2293,7 @@ where
         destination_account: &Pubkey,
         source_authority: &Pubkey,
         equality_proof_account: Option<&ProofAccount>,
-        ciphertext_validity_proof_account: Option<&ProofAccount>,
+        ciphertext_validity_proof_account_with_ciphertext: Option<&ProofAccountWithCiphertext>,
         range_proof_account: Option<&ProofAccount>,
         transfer_amount: u64,
         account_info: Option<TransferAccountInfo>,
@@ -2220,46 +2315,65 @@ where
             TransferAccountInfo::new(confidential_transfer_account)
         };
 
-        let (equality_proof_data, ciphertext_validity_proof_data, range_proof_data) = if [
-            equality_proof_account,
-            ciphertext_validity_proof_account,
-            range_proof_account,
-        ]
-        .iter()
-        .all(|proof_account| proof_account.is_some())
-        {
-            (None, None, None)
-        } else {
-            let TransferProofData {
-                equality_proof_data,
-                ciphertext_validity_proof_data,
-                range_proof_data,
-            } = account_info
-                .generate_split_transfer_proof_data(
-                    transfer_amount,
-                    source_elgamal_keypair,
-                    source_aes_key,
-                    destination_elgamal_pubkey,
-                    auditor_elgamal_pubkey,
+        let (equality_proof_data, ciphertext_validity_proof_data_with_ciphertext, range_proof_data) =
+            if equality_proof_account.is_some()
+                && ciphertext_validity_proof_account_with_ciphertext.is_some()
+                && range_proof_account.is_some()
+            {
+                (None, None, None)
+            } else {
+                let TransferProofData {
+                    equality_proof_data,
+                    ciphertext_validity_proof_data_with_ciphertext,
+                    range_proof_data,
+                } = account_info
+                    .generate_split_transfer_proof_data(
+                        transfer_amount,
+                        source_elgamal_keypair,
+                        source_aes_key,
+                        destination_elgamal_pubkey,
+                        auditor_elgamal_pubkey,
+                    )
+                    .map_err(|_| TokenError::ProofGeneration)?;
+
+                // if proof accounts are none, then proof data must be included as instruction
+                // data
+                let equality_proof_data = equality_proof_account
+                    .is_none()
+                    .then_some(equality_proof_data);
+                let ciphertext_validity_proof_data_with_ciphertext =
+                    ciphertext_validity_proof_account_with_ciphertext
+                        .is_none()
+                        .then_some(ciphertext_validity_proof_data_with_ciphertext);
+                let range_proof_data = range_proof_account.is_none().then_some(range_proof_data);
+
+                (
+                    equality_proof_data,
+                    ciphertext_validity_proof_data_with_ciphertext,
+                    range_proof_data,
                 )
-                .map_err(|_| TokenError::ProofGeneration)?;
+            };
 
-            // if proof accounts are none, then proof data must be included as instruction
-            // data
-            let equality_proof_data = equality_proof_account
-                .is_none()
-                .then_some(equality_proof_data);
-            let ciphertext_validity_proof_data = ciphertext_validity_proof_account
-                .is_none()
-                .then_some(ciphertext_validity_proof_data);
-            let range_proof_data = range_proof_account.is_none().then_some(range_proof_data);
-
-            (
-                equality_proof_data,
-                ciphertext_validity_proof_data,
-                range_proof_data,
-            )
-        };
+        let (transfer_amount_auditor_ciphertext_lo, transfer_amount_auditor_ciphertext_hi) =
+            if let Some(proof_data_with_ciphertext) = ciphertext_validity_proof_data_with_ciphertext
+            {
+                (
+                    proof_data_with_ciphertext.ciphertext_lo,
+                    proof_data_with_ciphertext.ciphertext_hi,
+                )
+            } else {
+                // unwrap is safe as long as either `proof_data_with_ciphertext`,
+                // `proof_account_with_ciphertext` is `Some(..)`, which is guaranteed by the
+                // previous check
+                (
+                    ciphertext_validity_proof_account_with_ciphertext
+                        .unwrap()
+                        .ciphertext_lo,
+                    ciphertext_validity_proof_account_with_ciphertext
+                        .unwrap()
+                        .ciphertext_hi,
+                )
+            };
 
         // cannot panic as long as either `proof_data` or `proof_account` is `Some(..)`,
         // which is guaranteed by the previous check
@@ -2269,9 +2383,11 @@ where
             1,
         )
         .unwrap();
+        let ciphertext_validity_proof_data =
+            ciphertext_validity_proof_data_with_ciphertext.map(|data| data.proof_data);
         let ciphertext_validity_proof_location = Self::confidential_transfer_create_proof_location(
             ciphertext_validity_proof_data.as_ref(),
-            ciphertext_validity_proof_account,
+            ciphertext_validity_proof_account_with_ciphertext.map(|account| &account.proof_account),
             2,
         )
         .unwrap();
@@ -2292,6 +2408,8 @@ where
             self.get_address(),
             destination_account,
             new_decryptable_available_balance.into(),
+            &transfer_amount_auditor_ciphertext_lo,
+            &transfer_amount_auditor_ciphertext_hi,
             source_authority,
             &multisig_signers,
             equality_proof_location,
@@ -2526,7 +2644,9 @@ where
         destination_account: &Pubkey,
         source_authority: &Pubkey,
         equality_proof_account: Option<&ProofAccount>,
-        transfer_amount_ciphertext_validity_proof_account: Option<&ProofAccount>,
+        transfer_amount_ciphertext_validity_proof_account_with_ciphertext: Option<
+            &ProofAccountWithCiphertext,
+        >,
         percentage_with_cap_proof_account: Option<&ProofAccount>,
         fee_ciphertext_validity_proof_account: Option<&ProofAccount>,
         range_proof_account: Option<&ProofAccount>,
@@ -2555,26 +2675,22 @@ where
 
         let (
             equality_proof_data,
-            transfer_amount_ciphertext_validity_proof_data,
+            transfer_amount_ciphertext_validity_proof_data_with_ciphertext,
             percentage_with_cap_proof_data,
             fee_ciphertext_validity_proof_data,
             range_proof_data,
-        ) = if [
-            equality_proof_account,
-            transfer_amount_ciphertext_validity_proof_account,
-            percentage_with_cap_proof_account,
-            fee_ciphertext_validity_proof_account,
-            range_proof_account,
-        ]
-        .iter()
-        .all(|proof_account| proof_account.is_some())
+        ) = if equality_proof_account.is_some()
+            && transfer_amount_ciphertext_validity_proof_account_with_ciphertext.is_some()
+            && percentage_with_cap_proof_account.is_some()
+            && fee_ciphertext_validity_proof_account.is_some()
+            && range_proof_account.is_some()
         {
             // is all proofs come from accounts, then skip proof generation
             (None, None, None, None, None)
         } else {
             let TransferWithFeeProofData {
                 equality_proof_data,
-                transfer_amount_ciphertext_validity_proof_data,
+                transfer_amount_ciphertext_validity_proof_data_with_ciphertext,
                 percentage_with_cap_proof_data,
                 fee_ciphertext_validity_proof_data,
                 range_proof_data,
@@ -2594,10 +2710,10 @@ where
             let equality_proof_data = equality_proof_account
                 .is_none()
                 .then_some(equality_proof_data);
-            let transfer_amount_ciphertext_validity_proof_data =
-                transfer_amount_ciphertext_validity_proof_account
+            let transfer_amount_ciphertext_validity_proof_data_with_ciphertext =
+                transfer_amount_ciphertext_validity_proof_account_with_ciphertext
                     .is_none()
-                    .then_some(transfer_amount_ciphertext_validity_proof_data);
+                    .then_some(transfer_amount_ciphertext_validity_proof_data_with_ciphertext);
             let percentage_with_cap_proof_data = percentage_with_cap_proof_account
                 .is_none()
                 .then_some(percentage_with_cap_proof_data);
@@ -2608,12 +2724,34 @@ where
 
             (
                 equality_proof_data,
-                transfer_amount_ciphertext_validity_proof_data,
+                transfer_amount_ciphertext_validity_proof_data_with_ciphertext,
                 percentage_with_cap_proof_data,
                 fee_ciphertext_validity_proof_data,
                 range_proof_data,
             )
         };
+
+        let (transfer_amount_auditor_ciphertext_lo, transfer_amount_auditor_ciphertext_hi) =
+            if let Some(proof_data_with_ciphertext) =
+                transfer_amount_ciphertext_validity_proof_data_with_ciphertext
+            {
+                (
+                    proof_data_with_ciphertext.ciphertext_lo,
+                    proof_data_with_ciphertext.ciphertext_hi,
+                )
+            } else {
+                // unwrap is safe as long as either `proof_data_with_ciphertext`,
+                // `proof_account_with_ciphertext` is `Some(..)`, which is guaranteed by the
+                // previous check
+                (
+                    transfer_amount_ciphertext_validity_proof_account_with_ciphertext
+                        .unwrap()
+                        .ciphertext_lo,
+                    transfer_amount_ciphertext_validity_proof_account_with_ciphertext
+                        .unwrap()
+                        .ciphertext_hi,
+                )
+            };
 
         // cannot panic as long as either `proof_data` or `proof_account` is `Some(..)`,
         // which is guaranteed by the previous check
@@ -2623,10 +2761,14 @@ where
             1,
         )
         .unwrap();
+        let transfer_amount_ciphertext_validity_proof_data =
+            transfer_amount_ciphertext_validity_proof_data_with_ciphertext
+                .map(|data| data.proof_data);
         let transfer_amount_ciphertext_validity_proof_location =
             Self::confidential_transfer_create_proof_location(
                 transfer_amount_ciphertext_validity_proof_data.as_ref(),
-                transfer_amount_ciphertext_validity_proof_account,
+                transfer_amount_ciphertext_validity_proof_account_with_ciphertext
+                    .map(|account| &account.proof_account),
                 2,
             )
             .unwrap();
@@ -2660,6 +2802,8 @@ where
             self.get_address(),
             destination_account,
             new_decryptable_available_balance.into(),
+            &transfer_amount_auditor_ciphertext_lo,
+            &transfer_amount_auditor_ciphertext_hi,
             source_authority,
             &multisig_signers,
             equality_proof_location,

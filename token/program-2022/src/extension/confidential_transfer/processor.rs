@@ -1,12 +1,13 @@
 // Remove feature once zk ops syscalls are enabled on all networks
 #[cfg(feature = "zk-ops")]
 use {
+    crate::extension::confidential_mint_burn::ConfidentialMintBurn,
     crate::extension::non_transferable::NonTransferableAccount,
     spl_token_confidential_transfer_ciphertext_arithmetic as ciphertext_arithmetic,
 };
 use {
     crate::{
-        check_elgamal_registry_program_account, check_program_account,
+        check_auditor_ciphertext, check_elgamal_registry_program_account, check_program_account,
         error::TokenError,
         extension::{
             confidential_transfer::{instruction::*, verify_proof::*, *},
@@ -15,6 +16,7 @@ use {
                 EncryptedWithheldAmount,
             },
             memo_transfer::{check_previous_sibling_instruction_is_memo, memo_required},
+            pausable::PausableConfig,
             set_account_type,
             transfer_fee::TransferFeeConfig,
             transfer_hook, BaseStateWithExtensions, BaseStateWithExtensionsMut,
@@ -44,7 +46,7 @@ use {
     },
 };
 
-/// Processes an [InitializeMint] instruction.
+/// Processes an [`InitializeMint`] instruction.
 fn process_initialize_mint(
     accounts: &[AccountInfo],
     authority: &OptionalNonZeroPubkey,
@@ -66,7 +68,7 @@ fn process_initialize_mint(
     Ok(())
 }
 
-/// Processes an [UpdateMint] instruction.
+/// Processes an [`UpdateMint`] instruction.
 fn process_update_mint(
     accounts: &[AccountInfo],
     auto_approve_new_account: PodBool,
@@ -103,7 +105,7 @@ enum ElGamalPubkeySource<'a> {
     ElGamalRegistry(&'a ElGamalRegistry),
 }
 
-/// Processes a [ConfigureAccountWithRegistry] instruction.
+/// Processes a [`ConfigureAccountWithRegistry`] instruction.
 fn process_configure_account_with_registry(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -194,7 +196,7 @@ fn reallocate_for_configure_account_with_registry<'a>(
     Ok(())
 }
 
-/// Processes a [ConfigureAccount] instruction.
+/// Processes a [`ConfigureAccount`] instruction.
 fn process_configure_account(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -262,6 +264,7 @@ fn process_configure_account(
     // `ConfidentialTransferAccount` extension
     let confidential_transfer_account =
         token_account.init_extension::<ConfidentialTransferAccount>(false)?;
+
     confidential_transfer_account.approved = confidential_transfer_mint.auto_approve_new_accounts;
     confidential_transfer_account.elgamal_pubkey = elgamal_pubkey;
     confidential_transfer_account.maximum_pending_balance_credit_counter =
@@ -290,7 +293,7 @@ fn process_configure_account(
     Ok(())
 }
 
-/// Processes an [ApproveAccount] instruction.
+/// Processes an [`ApproveAccount`] instruction.
 fn process_approve_account(accounts: &[AccountInfo]) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
     let token_account_info = next_account_info(account_info_iter)?;
@@ -324,7 +327,7 @@ fn process_approve_account(accounts: &[AccountInfo]) -> ProgramResult {
     }
 }
 
-/// Processes an [EmptyAccount] instruction.
+/// Processes an [`EmptyAccount`] instruction.
 fn process_empty_account(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -377,7 +380,7 @@ fn process_empty_account(
     Ok(())
 }
 
-/// Processes a [Deposit] instruction.
+/// Processes a [`Deposit`] instruction.
 #[cfg(feature = "zk-ops")]
 fn process_deposit(
     program_id: &Pubkey,
@@ -395,8 +398,18 @@ fn process_deposit(
     let mint_data = &mint_info.data.borrow_mut();
     let mint = PodStateWithExtensions::<PodMint>::unpack(mint_data)?;
 
+    if let Ok(extension) = mint.get_extension::<PausableConfig>() {
+        if extension.paused.into() {
+            return Err(TokenError::MintPaused.into());
+        }
+    }
+
     if expected_decimals != mint.base.decimals {
         return Err(TokenError::MintDecimalsMismatch.into());
+    }
+
+    if mint.get_extension::<ConfidentialMintBurn>().is_ok() {
+        return Err(TokenError::IllegalMintBurnConversion.into());
     }
 
     check_program_account(token_account_info.owner)?;
@@ -474,7 +487,7 @@ pub fn verify_and_split_deposit_amount(amount: u64) -> Result<(u64, u64), TokenE
     Ok((deposit_amount_lo, deposit_amount_hi))
 }
 
-/// Processes a [Withdraw] instruction.
+/// Processes a [`Withdraw`] instruction.
 #[cfg(feature = "zk-ops")]
 fn process_withdraw(
     program_id: &Pubkey,
@@ -506,6 +519,16 @@ fn process_withdraw(
 
     if expected_decimals != mint.base.decimals {
         return Err(TokenError::MintDecimalsMismatch.into());
+    }
+
+    if mint.get_extension::<ConfidentialMintBurn>().is_ok() {
+        return Err(TokenError::IllegalMintBurnConversion.into());
+    }
+
+    if let Ok(extension) = mint.get_extension::<PausableConfig>() {
+        if extension.paused.into() {
+            return Err(TokenError::MintPaused.into());
+        }
     }
 
     check_program_account(token_account_info.owner)?;
@@ -574,13 +597,15 @@ fn process_withdraw(
     Ok(())
 }
 
-/// Processes a [Transfer] or [TransferWithFee] instruction.
+/// Processes a [`Transfer`] or [`TransferWithFee`] instruction.
 #[allow(clippy::too_many_arguments)]
 #[cfg(feature = "zk-ops")]
 fn process_transfer(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     new_source_decryptable_available_balance: DecryptableBalance,
+    transfer_amount_auditor_ciphertext_lo: &PodElGamalCiphertext,
+    transfer_amount_auditor_ciphertext_hi: &PodElGamalCiphertext,
     equality_proof_instruction_offset: i64,
     transfer_amount_ciphertext_validity_proof_instruction_offset: i64,
     fee_sigma_proof_instruction_offset: Option<i64>,
@@ -595,6 +620,12 @@ fn process_transfer(
     check_program_account(mint_info.owner)?;
     let mint_data = mint_info.data.borrow_mut();
     let mint = PodStateWithExtensions::<PodMint>::unpack(&mint_data)?;
+
+    if let Ok(extension) = mint.get_extension::<PausableConfig>() {
+        if extension.paused.into() {
+            return Err(TokenError::MintPaused.into());
+        }
+    }
 
     let confidential_transfer_mint = mint.get_extension::<ConfidentialTransferMint>()?;
 
@@ -632,6 +663,22 @@ fn process_transfer(
         {
             return Err(TokenError::ConfidentialTransferElGamalPubkeyMismatch.into());
         }
+
+        let proof_context_auditor_ciphertext_lo = proof_context
+            .ciphertext_lo
+            .try_extract_ciphertext(2)
+            .map_err(|e| -> TokenError { e.into() })?;
+        let proof_context_auditor_ciphertext_hi = proof_context
+            .ciphertext_hi
+            .try_extract_ciphertext(2)
+            .map_err(|e| -> TokenError { e.into() })?;
+
+        check_auditor_ciphertext(
+            transfer_amount_auditor_ciphertext_lo,
+            transfer_amount_auditor_ciphertext_hi,
+            &proof_context_auditor_ciphertext_lo,
+            &proof_context_auditor_ciphertext_hi,
+        )?;
 
         process_source_for_transfer(
             program_id,
@@ -698,6 +745,22 @@ fn process_transfer(
             return Err(TokenError::ConfidentialTransferElGamalPubkeyMismatch.into());
         }
 
+        let proof_context_auditor_ciphertext_lo = proof_context
+            .ciphertext_lo
+            .try_extract_ciphertext(2)
+            .map_err(TokenError::from)?;
+        let proof_context_auditor_ciphertext_hi = proof_context
+            .ciphertext_hi
+            .try_extract_ciphertext(2)
+            .map_err(TokenError::from)?;
+
+        check_auditor_ciphertext(
+            transfer_amount_auditor_ciphertext_lo,
+            transfer_amount_auditor_ciphertext_hi,
+            &proof_context_auditor_ciphertext_lo,
+            &proof_context_auditor_ciphertext_hi,
+        )?;
+
         process_source_for_transfer_with_fee(
             program_id,
             source_account_info,
@@ -757,6 +820,7 @@ fn process_transfer(
     Ok(())
 }
 
+/// Processes the changes for the sending party of a confidential transfer
 #[cfg(feature = "zk-ops")]
 fn process_source_for_transfer(
     program_id: &Pubkey,
@@ -807,11 +871,11 @@ fn process_source_for_transfer(
     let source_transfer_amount_lo = proof_context
         .ciphertext_lo
         .try_extract_ciphertext(0)
-        .map_err(|e| -> TokenError { e.into() })?;
+        .map_err(TokenError::from)?;
     let source_transfer_amount_hi = proof_context
         .ciphertext_hi
         .try_extract_ciphertext(0)
-        .map_err(|e| -> TokenError { e.into() })?;
+        .map_err(TokenError::from)?;
 
     let new_source_available_balance = ciphertext_arithmetic::subtract_with_lo_hi(
         &confidential_transfer_account.available_balance,
@@ -869,11 +933,11 @@ fn process_destination_for_transfer(
     let destination_ciphertext_lo = proof_context
         .ciphertext_lo
         .try_extract_ciphertext(1)
-        .map_err(|e| -> TokenError { e.into() })?;
+        .map_err(TokenError::from)?;
     let destination_ciphertext_hi = proof_context
         .ciphertext_hi
         .try_extract_ciphertext(1)
-        .map_err(|e| -> TokenError { e.into() })?;
+        .map_err(TokenError::from)?;
 
     destination_confidential_transfer_account.pending_balance_lo = ciphertext_arithmetic::add(
         &destination_confidential_transfer_account.pending_balance_lo,
@@ -945,11 +1009,11 @@ fn process_source_for_transfer_with_fee(
     let source_transfer_amount_lo = proof_context
         .ciphertext_lo
         .try_extract_ciphertext(0)
-        .map_err(|e| -> TokenError { e.into() })?;
+        .map_err(TokenError::from)?;
     let source_transfer_amount_hi = proof_context
         .ciphertext_hi
         .try_extract_ciphertext(0)
-        .map_err(|e| -> TokenError { e.into() })?;
+        .map_err(TokenError::from)?;
 
     let new_source_available_balance = ciphertext_arithmetic::subtract_with_lo_hi(
         &confidential_transfer_account.available_balance,
@@ -1008,11 +1072,11 @@ fn process_destination_for_transfer_with_fee(
     let destination_transfer_amount_lo = proof_context
         .ciphertext_lo
         .try_extract_ciphertext(1)
-        .map_err(|e| -> TokenError { e.into() })?;
+        .map_err(TokenError::from)?;
     let destination_transfer_amount_hi = proof_context
         .ciphertext_hi
         .try_extract_ciphertext(1)
-        .map_err(|e| -> TokenError { e.into() })?;
+        .map_err(TokenError::from)?;
 
     destination_confidential_transfer_account.pending_balance_lo = ciphertext_arithmetic::add(
         &destination_confidential_transfer_account.pending_balance_lo,
@@ -1035,11 +1099,11 @@ fn process_destination_for_transfer_with_fee(
         let destination_fee_lo = proof_context
             .fee_ciphertext_lo
             .try_extract_ciphertext(0)
-            .map_err(|e| -> TokenError { e.into() })?;
+            .map_err(TokenError::from)?;
         let destination_fee_hi = proof_context
             .fee_ciphertext_hi
             .try_extract_ciphertext(0)
-            .map_err(|e| -> TokenError { e.into() })?;
+            .map_err(TokenError::from)?;
 
         // Subtract the fee amount from the destination pending balance
         destination_confidential_transfer_account.pending_balance_lo =
@@ -1060,11 +1124,11 @@ fn process_destination_for_transfer_with_fee(
         let withdraw_withheld_authority_fee_lo = proof_context
             .fee_ciphertext_lo
             .try_extract_ciphertext(1)
-            .map_err(|e| -> TokenError { e.into() })?;
+            .map_err(TokenError::from)?;
         let withdraw_withheld_authority_fee_hi = proof_context
             .fee_ciphertext_hi
             .try_extract_ciphertext(1)
-            .map_err(|e| -> TokenError { e.into() })?;
+            .map_err(TokenError::from)?;
 
         let destination_confidential_transfer_fee_amount =
             destination_token_account.get_extension_mut::<ConfidentialTransferFeeAmount>()?;
@@ -1082,7 +1146,7 @@ fn process_destination_for_transfer_with_fee(
     Ok(())
 }
 
-/// Processes an [ApplyPendingBalance] instruction.
+/// Processes an [`ApplyPendingBalance`] instruction.
 #[cfg(feature = "zk-ops")]
 fn process_apply_pending_balance(
     program_id: &Pubkey,
@@ -1132,7 +1196,7 @@ fn process_apply_pending_balance(
     Ok(())
 }
 
-/// Processes a [DisableConfidentialCredits] or [EnableConfidentialCredits]
+/// Processes a [`DisableConfidentialCredits`] or [`EnableConfidentialCredits`]
 /// instruction.
 fn process_allow_confidential_credits(
     program_id: &Pubkey,
@@ -1163,8 +1227,8 @@ fn process_allow_confidential_credits(
     Ok(())
 }
 
-/// Processes an [DisableNonConfidentialCredits] or
-/// [EnableNonConfidentialCredits] instruction.
+/// Processes an [`DisableNonConfidentialCredits`] or
+/// [`EnableNonConfidentialCredits`] instruction.
 fn process_allow_non_confidential_credits(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -1280,6 +1344,8 @@ pub(crate) fn process_instruction(
                     program_id,
                     accounts,
                     data.new_source_decryptable_available_balance,
+                    &data.transfer_amount_auditor_ciphertext_lo,
+                    &data.transfer_amount_auditor_ciphertext_hi,
                     data.equality_proof_instruction_offset as i64,
                     data.ciphertext_validity_proof_instruction_offset as i64,
                     None,
@@ -1330,6 +1396,8 @@ pub(crate) fn process_instruction(
                     program_id,
                     accounts,
                     data.new_source_decryptable_available_balance,
+                    &data.transfer_amount_auditor_ciphertext_lo,
+                    &data.transfer_amount_auditor_ciphertext_hi,
                     data.equality_proof_instruction_offset as i64,
                     data.transfer_amount_ciphertext_validity_proof_instruction_offset as i64,
                     Some(data.fee_sigma_proof_instruction_offset as i64),
