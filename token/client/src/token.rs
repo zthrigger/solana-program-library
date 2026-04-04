@@ -1046,6 +1046,23 @@ where
                 amount,
             )?
         };
+        if let Some(transfer_hook_accounts) = &self.transfer_hook_accounts {
+            instruction.accounts.extend(transfer_hook_accounts.clone());
+        } else {
+            #[allow(deprecated)]
+            offchain::resolve_extra_transfer_account_metas(
+                &mut instruction,
+                |address| {
+                    self.client
+                        .get_account(address)
+                        .map_ok(|opt| opt.map(|acc| acc.data))
+                },
+                self.get_address(),
+                amount,
+            )
+            .await
+            .map_err(|_| TokenError::AccountNotFound)?;
+        };
 
         self.process_ixs(&[instruction], signing_keypairs).await
     }
