@@ -1,7 +1,7 @@
 #![allow(clippy::arithmetic_side_effects)]
+#![allow(deprecated)]
 
 use {
-    borsh::BorshSerialize,
     clap::{CommandFactory, Parser},
     solana_clap_v3_utils::input_parsers::Amount,
     solana_client::{
@@ -9,7 +9,7 @@ use {
         rpc_filter::{Memcmp, RpcFilterType},
     },
     solana_sdk::{
-        borsh0_10::try_from_slice_unchecked,
+        borsh1::try_from_slice_unchecked,
         pubkey::Pubkey,
         signature::{Keypair, Signature, Signer},
         stake,
@@ -133,9 +133,7 @@ async fn command_initialize(config: &Config, command_config: InitializeCli) -> C
     if command_config.skip_metadata {
         assert_eq!(
             instructions.last().unwrap().data,
-            SinglePoolInstruction::CreateTokenMetadata
-                .try_to_vec()
-                .unwrap()
+            borsh::to_vec(&SinglePoolInstruction::CreateTokenMetadata).unwrap()
         );
 
         instructions.pop();
@@ -410,7 +408,7 @@ async fn command_withdraw(config: &Config, command_config: WithdrawCli) -> Comma
     let stake_account = Keypair::new();
     let stake_account_address = stake_account.pubkey();
 
-    // since we cant infer pool from token account, the withdraw invocation is
+    // since we can't infer pool from token account, the withdraw invocation is
     // rather simpler first get the pool address
     let pool_address = pool_address_from_args(
         command_config.pool_address,
@@ -757,7 +755,7 @@ async fn command_create_stake(config: &Config, command_config: CreateStakeCli) -
 // display stake pool(s)
 async fn command_display(config: &Config, command_config: DisplayCli) -> CommandResult {
     if command_config.all {
-        // the filter isnt necessary now but makes the cli forward-compatible
+        // the filter isn't necessary now but makes the cli forward-compatible
         let pools = config
             .rpc_client
             .get_program_accounts_with_config(

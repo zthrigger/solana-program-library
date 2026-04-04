@@ -1,8 +1,9 @@
+import { strict as assert } from 'node:assert';
+
 import { AnchorProvider } from '@project-serum/anchor';
 import NodeWallet from '@project-serum/anchor/dist/cjs/nodewallet';
 import { Connection, Keypair, PublicKey, TransactionInstruction } from '@solana/web3.js';
 import { BN } from 'bn.js';
-import { assert } from 'chai';
 import * as crypto from 'crypto';
 
 import {
@@ -195,7 +196,7 @@ describe('Account Compression', () => {
 
             assert(
                 splCMT.getAuthority().equals(randomSigner),
-                `Upon transfering authority, authority should be ${randomSigner.toString()}, but was instead updated to ${splCMT.getAuthority()}`
+                `Upon transferring authority, authority should be ${randomSigner.toString()}, but was instead updated to ${splCMT.getAuthority()}`
             );
 
             // Attempting to replace with new authority now works
@@ -341,7 +342,7 @@ describe('Account Compression', () => {
 
             try {
                 await execute(provider, [replaceIx], [payerKeypair]);
-                assert(false, 'Attacker was able to succesfully write fake existence of a leaf');
+                assert(false, 'Attacker was able to successfully write fake existence of a leaf');
             } catch (e) {}
 
             const splCMT = await ConcurrentMerkleTreeAccount.fromAccountAddress(connection, cmt);

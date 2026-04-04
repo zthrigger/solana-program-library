@@ -6,7 +6,7 @@ mod helpers;
 use {
     helpers::*,
     solana_program::{
-        borsh0_10::try_from_slice_unchecked, instruction::InstructionError, pubkey::Pubkey, stake,
+        borsh1::try_from_slice_unchecked, instruction::InstructionError, pubkey::Pubkey, stake,
     },
     solana_program_test::*,
     solana_sdk::{
@@ -214,7 +214,7 @@ async fn fail_overdraw_reserve() {
         .await;
     assert!(error.is_none(), "{:?}", error);
 
-    // try to withdraw one lamport, will overdraw
+    // try to withdraw one lamport after fees, will overdraw
     let error = stake_pool_accounts
         .withdraw_sol(
             &mut context.banks_client,
@@ -222,7 +222,7 @@ async fn fail_overdraw_reserve() {
             &context.last_blockhash,
             &user,
             &pool_token_account,
-            1,
+            2,
             None,
         )
         .await

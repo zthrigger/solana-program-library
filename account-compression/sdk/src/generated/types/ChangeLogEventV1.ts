@@ -12,9 +12,9 @@ import * as web3 from '@solana/web3.js';
 import { PathNode, pathNodeBeet } from './PathNode';
 export type ChangeLogEventV1 = {
     id: web3.PublicKey;
+    index: number;
     path: PathNode[];
     seq: beet.bignum;
-    index: number;
 };
 
 /**
@@ -28,5 +28,5 @@ export const changeLogEventV1Beet = new beet.FixableBeetArgsStruct<ChangeLogEven
         ['seq', beet.u64],
         ['index', beet.u32],
     ],
-    'ChangeLogEventV1'
+    'ChangeLogEventV1',
 );

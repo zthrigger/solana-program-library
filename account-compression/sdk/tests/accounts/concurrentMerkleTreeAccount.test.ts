@@ -1,13 +1,14 @@
+import { strict as assert } from 'node:assert';
+
 import { AnchorProvider } from '@project-serum/anchor';
 import NodeWallet from '@project-serum/anchor/dist/cjs/nodewallet';
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-import { assert } from 'chai';
 
 import { ALL_DEPTH_SIZE_PAIRS, ConcurrentMerkleTreeAccount, getConcurrentMerkleTreeAccountSize } from '../../src';
 import { emptyNode, MerkleTree } from '../../src/merkle-tree';
 import { createEmptyTreeOnChain, createTreeOnChain } from '../utils';
 
-async function assertCMTProperties(
+function assertCMTProperties(
     onChainCMT: ConcurrentMerkleTreeAccount,
     expectedMaxDepth: number,
     expectedMaxBufferSize: number,

@@ -5,10 +5,9 @@ mod helpers;
 
 use {
     bincode::deserialize,
-    borsh::BorshSerialize,
     helpers::*,
     solana_program::{
-        borsh0_10::try_from_slice_unchecked,
+        borsh1::try_from_slice_unchecked,
         instruction::{AccountMeta, Instruction, InstructionError},
         pubkey::Pubkey,
         stake, system_instruction, sysvar,
@@ -87,7 +86,6 @@ async fn success() {
             &mut context.banks_client,
             &context.payer,
             &context.last_blockhash,
-            &[validator_stake.vote.pubkey()],
             false,
         )
         .await;
@@ -140,9 +138,7 @@ async fn fail_with_wrong_stake_program_id() {
     let instruction = Instruction {
         program_id: id(),
         accounts,
-        data: instruction::StakePoolInstruction::RemoveValidatorFromPool
-            .try_to_vec()
-            .unwrap(),
+        data: borsh::to_vec(&instruction::StakePoolInstruction::RemoveValidatorFromPool).unwrap(),
     };
 
     let mut transaction =
@@ -267,7 +263,6 @@ async fn fail_double_remove() {
             &mut context.banks_client,
             &context.payer,
             &context.last_blockhash,
-            &[validator_stake.vote.pubkey()],
             false,
         )
         .await;
@@ -358,9 +353,7 @@ async fn fail_no_signature() {
     let instruction = Instruction {
         program_id: id(),
         accounts,
-        data: instruction::StakePoolInstruction::RemoveValidatorFromPool
-            .try_to_vec()
-            .unwrap(),
+        data: borsh::to_vec(&instruction::StakePoolInstruction::RemoveValidatorFromPool).unwrap(),
     };
 
     let transaction = Transaction::new_signed_with_payer(
@@ -567,7 +560,6 @@ async fn success_with_deactivating_transient_stake() {
             &mut context.banks_client,
             &context.payer,
             &context.last_blockhash,
-            &[validator_stake.vote.pubkey()],
             false,
         )
         .await;
@@ -629,7 +621,6 @@ async fn success_resets_preferred_validator() {
             &mut context.banks_client,
             &context.payer,
             &context.last_blockhash,
-            &[validator_stake.vote.pubkey()],
             false,
         )
         .await;
@@ -701,7 +692,6 @@ async fn success_with_hijacked_transient_account() {
             &mut context.banks_client,
             &context.payer,
             &context.last_blockhash,
-            &[validator_stake.vote.pubkey()],
             false,
         )
         .await;
@@ -739,17 +729,18 @@ async fn success_with_hijacked_transient_account() {
     .0;
     let transaction = Transaction::new_signed_with_payer(
         &[
-            instruction::update_validator_list_balance(
+            instruction::update_validator_list_balance_chunk(
                 &id(),
                 &stake_pool_accounts.stake_pool.pubkey(),
                 &stake_pool_accounts.withdraw_authority,
                 &stake_pool_accounts.validator_list.pubkey(),
                 &stake_pool_accounts.reserve_stake.pubkey(),
                 &validator_list,
-                &[validator_stake.vote.pubkey()],
+                1,
                 0,
                 /* no_merge = */ false,
-            ),
+            )
+            .unwrap(),
             system_instruction::transfer(
                 &context.payer.pubkey(),
                 &transient_stake_address,
@@ -822,7 +813,6 @@ async fn success_with_hijacked_transient_account() {
             &mut context.banks_client,
             &context.payer,
             &context.last_blockhash,
-            &[validator_stake.vote.pubkey()],
             false,
         )
         .await;

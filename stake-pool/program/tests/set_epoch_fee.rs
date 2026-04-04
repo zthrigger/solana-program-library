@@ -7,7 +7,7 @@ use {
     helpers::*,
     solana_program_test::*,
     solana_sdk::{
-        borsh0_10::try_from_slice_unchecked,
+        borsh1::try_from_slice_unchecked,
         instruction::InstructionError,
         signature::{Keypair, Signer},
         transaction::{Transaction, TransactionError},
@@ -87,7 +87,6 @@ async fn success() {
             &mut context.banks_client,
             &context.payer,
             &context.last_blockhash,
-            &[],
             false,
         )
         .await;
@@ -112,7 +111,6 @@ async fn success() {
             &mut context.banks_client,
             &context.payer,
             &last_blockhash,
-            &[],
             false,
         )
         .await;

@@ -1,6 +1,9 @@
 use {
     crate::{
-        client::{ProgramClient, ProgramClientError, SendTransaction, SimulateTransaction},
+        client::{
+            ProgramClient, ProgramClientError, SendTransaction, SimulateTransaction,
+            SimulationResult,
+        },
         proof_generation::transfer_with_fee_split_proof_data,
     },
     futures::{future::join_all, try_join},
@@ -8,6 +11,7 @@ use {
     solana_program_test::tokio::time,
     solana_sdk::{
         account::Account as BaseAccount,
+        compute_budget::ComputeBudgetInstruction,
         hash::Hash,
         instruction::{AccountMeta, Instruction},
         message::Message,
@@ -328,6 +332,13 @@ impl TokenMemo {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum ComputeUnitLimit {
+    Default,
+    Simulated,
+    Static(u32),
+}
+
 pub struct Token<T> {
     client: Arc<dyn ProgramClient<T>>,
     pubkey: Pubkey, /* token mint */
@@ -339,6 +350,8 @@ pub struct Token<T> {
     nonce_blockhash: Option<Hash>,
     memo: Arc<RwLock<Option<TokenMemo>>>,
     transfer_hook_accounts: Option<Vec<AccountMeta>>,
+    compute_unit_price: Option<u64>,
+    compute_unit_limit: ComputeUnitLimit,
 }
 
 impl<T> fmt::Debug for Token<T> {
@@ -356,6 +369,8 @@ impl<T> fmt::Debug for Token<T> {
             .field("nonce_blockhash", &self.nonce_blockhash)
             .field("memo", &self.memo.read().unwrap())
             .field("transfer_hook_accounts", &self.transfer_hook_accounts)
+            .field("compute_unit_price", &self.compute_unit_price)
+            .field("compute_unit_limit", &self.compute_unit_limit)
             .finish()
     }
 }
@@ -402,6 +417,8 @@ where
             nonce_blockhash: None,
             memo: Arc::new(RwLock::new(None)),
             transfer_hook_accounts: None,
+            compute_unit_price: None,
+            compute_unit_limit: ComputeUnitLimit::Default,
         }
     }
 
@@ -448,6 +465,16 @@ where
 
     pub fn with_transfer_hook_accounts(mut self, transfer_hook_accounts: Vec<AccountMeta>) -> Self {
         self.transfer_hook_accounts = Some(transfer_hook_accounts);
+        self
+    }
+
+    pub fn with_compute_unit_price(mut self, compute_unit_price: u64) -> Self {
+        self.compute_unit_price = Some(compute_unit_price);
+        self
+    }
+
+    pub fn with_compute_unit_limit(mut self, compute_unit_limit: ComputeUnitLimit) -> Self {
+        self.compute_unit_limit = compute_unit_limit;
         self
     }
 
@@ -505,6 +532,42 @@ where
         }
     }
 
+    /// Helper function to add a compute unit limit instruction to a given set
+    /// of instructions
+    async fn add_compute_unit_limit_from_simulation(
+        &self,
+        instructions: &mut Vec<Instruction>,
+        blockhash: &Hash,
+    ) -> TokenResult<()> {
+        // add a max compute unit limit instruction for the simulation
+        const MAX_COMPUTE_UNIT_LIMIT: u32 = 1_400_000;
+        instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(
+            MAX_COMPUTE_UNIT_LIMIT,
+        ));
+
+        let transaction = Transaction::new_unsigned(Message::new_with_blockhash(
+            instructions,
+            Some(&self.payer.pubkey()),
+            blockhash,
+        ));
+        let simulation_result = self
+            .client
+            .simulate_transaction(&transaction)
+            .await
+            .map_err(TokenError::Client)?;
+        let units_consumed = simulation_result
+            .get_compute_units_consumed()
+            .map_err(TokenError::Client)?;
+        // Overwrite the compute unit limit instruction with the actual units consumed
+        let compute_unit_limit =
+            u32::try_from(units_consumed).map_err(|x| TokenError::Client(x.into()))?;
+        instructions
+            .last_mut()
+            .expect("Compute budget instruction was added earlier")
+            .data = ComputeBudgetInstruction::set_compute_unit_limit(compute_unit_limit).data;
+        Ok(())
+    }
+
     async fn construct_tx<S: Signers>(
         &self,
         token_instructions: &[Instruction],
@@ -532,41 +595,65 @@ where
 
         instructions.extend_from_slice(token_instructions);
 
-        let (message, blockhash) =
-            if let (Some(nonce_account), Some(nonce_authority), Some(nonce_blockhash)) = (
-                self.nonce_account,
-                &self.nonce_authority,
-                self.nonce_blockhash,
-            ) {
-                let mut message = Message::new_with_nonce(
-                    token_instructions.to_vec(),
-                    fee_payer,
-                    &nonce_account,
-                    &nonce_authority.pubkey(),
-                );
-                message.recent_blockhash = nonce_blockhash;
-                (message, nonce_blockhash)
-            } else {
-                let latest_blockhash = self
-                    .client
-                    .get_latest_blockhash()
-                    .await
-                    .map_err(TokenError::Client)?;
-                (
-                    Message::new_with_blockhash(&instructions, fee_payer, &latest_blockhash),
-                    latest_blockhash,
-                )
-            };
+        let blockhash = if let (Some(nonce_account), Some(nonce_authority), Some(nonce_blockhash)) = (
+            self.nonce_account,
+            &self.nonce_authority,
+            self.nonce_blockhash,
+        ) {
+            let nonce_instruction = system_instruction::advance_nonce_account(
+                &nonce_account,
+                &nonce_authority.pubkey(),
+            );
+            instructions.insert(0, nonce_instruction);
+            nonce_blockhash
+        } else {
+            self.client
+                .get_latest_blockhash()
+                .await
+                .map_err(TokenError::Client)?
+        };
 
+        if let Some(compute_unit_price) = self.compute_unit_price {
+            instructions.push(ComputeBudgetInstruction::set_compute_unit_price(
+                compute_unit_price,
+            ));
+        }
+
+        // The simulation to find out the compute unit usage must be run after
+        // all instructions have been added to the transaction, so be sure to
+        // keep this instruction as the last one before creating and sending the
+        // transaction.
+        match self.compute_unit_limit {
+            ComputeUnitLimit::Default => {}
+            ComputeUnitLimit::Simulated => {
+                self.add_compute_unit_limit_from_simulation(&mut instructions, &blockhash)
+                    .await?;
+            }
+            ComputeUnitLimit::Static(compute_unit_limit) => {
+                instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(
+                    compute_unit_limit,
+                ));
+            }
+        }
+
+        let message = Message::new_with_blockhash(&instructions, fee_payer, &blockhash);
         let mut transaction = Transaction::new_unsigned(message);
+        let signing_pubkeys = signing_keypairs.pubkeys();
 
-        transaction
-            .try_partial_sign(&vec![self.payer.clone()], blockhash)
-            .map_err(|error| TokenError::Client(error.into()))?;
-        if let Some(nonce_authority) = &self.nonce_authority {
+        if !signing_pubkeys.contains(&self.payer.pubkey()) {
             transaction
-                .try_partial_sign(&vec![nonce_authority.clone()], blockhash)
+                .try_partial_sign(&vec![self.payer.clone()], blockhash)
                 .map_err(|error| TokenError::Client(error.into()))?;
+        }
+        if let Some(nonce_authority) = &self.nonce_authority {
+            let nonce_authority_pubkey = nonce_authority.pubkey();
+            if nonce_authority_pubkey != self.payer.pubkey()
+                && !signing_pubkeys.contains(&nonce_authority_pubkey)
+            {
+                transaction
+                    .try_partial_sign(&vec![nonce_authority.clone()], blockhash)
+                    .map_err(|error| TokenError::Client(error.into()))?;
+            }
         }
         transaction
             .try_partial_sign(signing_keypairs, blockhash)
@@ -913,17 +1000,41 @@ where
         let signing_pubkeys = signing_keypairs.pubkeys();
         let multisig_signers = self.get_multisig_signers(authority, &signing_pubkeys);
 
-        let mut instruction = if let Some(decimals) = self.decimals {
-            instruction::transfer_checked(
-                &self.program_id,
-                source,
-                &self.pubkey,
-                destination,
-                authority,
-                &multisig_signers,
-                amount,
-                decimals,
-            )?
+        let fetch_account_data_fn = |address| {
+            self.client
+                .get_account(address)
+                .map_ok(|opt| opt.map(|acc| acc.data))
+        };
+
+        let instruction = if let Some(decimals) = self.decimals {
+            if let Some(transfer_hook_accounts) = &self.transfer_hook_accounts {
+                let mut instruction = instruction::transfer_checked(
+                    &self.program_id,
+                    source,
+                    self.get_address(),
+                    destination,
+                    authority,
+                    &multisig_signers,
+                    amount,
+                    decimals,
+                )?;
+                instruction.accounts.extend(transfer_hook_accounts.clone());
+                instruction
+            } else {
+                offchain::create_transfer_checked_instruction_with_extra_metas(
+                    &self.program_id,
+                    source,
+                    self.get_address(),
+                    destination,
+                    authority,
+                    &multisig_signers,
+                    amount,
+                    decimals,
+                    fetch_account_data_fn,
+                )
+                .await
+                .map_err(|_| TokenError::AccountNotFound)?
+            }
         } else {
             #[allow(deprecated)]
             instruction::transfer(
@@ -972,6 +1083,12 @@ where
         let signing_pubkeys = signing_keypairs.pubkeys();
         let multisig_signers = self.get_multisig_signers(authority, &signing_pubkeys);
 
+        let fetch_account_data_fn = |address| {
+            self.client
+                .get_account(address)
+                .map_ok(|opt| opt.map(|acc| acc.data))
+        };
+
         if *destination != self.get_associated_token_address(destination_owner) {
             return Err(TokenError::AccountInvalidAssociatedAddress);
         }
@@ -999,16 +1116,36 @@ where
                 fee,
             )?);
         } else if let Some(decimals) = self.decimals {
-            instructions.push(instruction::transfer_checked(
-                &self.program_id,
-                source,
-                &self.pubkey,
-                destination,
-                authority,
-                &multisig_signers,
-                amount,
-                decimals,
-            )?);
+            instructions.push(
+                if let Some(transfer_hook_accounts) = &self.transfer_hook_accounts {
+                    let mut instruction = instruction::transfer_checked(
+                        &self.program_id,
+                        source,
+                        self.get_address(),
+                        destination,
+                        authority,
+                        &multisig_signers,
+                        amount,
+                        decimals,
+                    )?;
+                    instruction.accounts.extend(transfer_hook_accounts.clone());
+                    instruction
+                } else {
+                    offchain::create_transfer_checked_instruction_with_extra_metas(
+                        &self.program_id,
+                        source,
+                        self.get_address(),
+                        destination,
+                        authority,
+                        &multisig_signers,
+                        amount,
+                        decimals,
+                        fetch_account_data_fn,
+                    )
+                    .await
+                    .map_err(|_| TokenError::AccountNotFound)?
+                },
+            );
         } else {
             #[allow(deprecated)]
             instructions.push(instruction::transfer(
@@ -2024,12 +2161,26 @@ where
         )
         .await?;
 
-        self.process_ixs(
+        // This instruction is right at the transaction size limit, so we cannot
+        // add any other instructions to it
+        let blockhash = self
+            .client
+            .get_latest_blockhash()
+            .await
+            .map_err(TokenError::Client)?;
+
+        let transaction = Transaction::new_signed_with_payer(
             &[instruction_type
                 .encode_verify_proof(Some(withdraw_proof_context_state_info), withdraw_proof_data)],
-            &[] as &[&dyn Signer; 0],
-        )
-        .await
+            Some(&self.payer.pubkey()),
+            &[self.payer.as_ref()],
+            blockhash,
+        );
+
+        self.client
+            .send_transaction(&transaction)
+            .await
+            .map_err(TokenError::Client)
     }
 
     /// Transfer tokens confidentially
@@ -2087,20 +2238,32 @@ where
             .new_decryptable_available_balance(transfer_amount, source_aes_key)
             .map_err(|_| TokenError::AccountDecryption)?;
 
-        self.process_ixs(
-            &confidential_transfer::instruction::transfer(
-                &self.program_id,
-                source_account,
-                &self.pubkey,
-                destination_account,
-                new_decryptable_available_balance,
-                source_authority,
-                &multisig_signers,
-                proof_location,
-            )?,
-            signing_keypairs,
+        let mut instructions = confidential_transfer::instruction::transfer(
+            &self.program_id,
+            source_account,
+            self.get_address(),
+            destination_account,
+            new_decryptable_available_balance,
+            source_authority,
+            &multisig_signers,
+            proof_location,
+        )?;
+        offchain::add_extra_account_metas(
+            &mut instructions[0],
+            source_account,
+            self.get_address(),
+            destination_account,
+            source_authority,
+            u64::MAX,
+            |address| {
+                self.client
+                    .get_account(address)
+                    .map_ok(|opt| opt.map(|acc| acc.data))
+            },
         )
         .await
+        .map_err(|_| TokenError::AccountNotFound)?;
+        self.process_ixs(&instructions, signing_keypairs).await
     }
 
     /// Transfer tokens confidentially using split proofs.
@@ -2133,22 +2296,32 @@ where
             .new_decryptable_available_balance(transfer_amount, source_aes_key)
             .map_err(|_| TokenError::AccountDecryption)?;
 
-        self.process_ixs(
-            &[
-                confidential_transfer::instruction::transfer_with_split_proofs(
-                    &self.program_id,
-                    source_account,
-                    &self.pubkey,
-                    destination_account,
-                    new_decryptable_available_balance.into(),
-                    source_authority,
-                    context_state_accounts,
-                    source_decrypt_handles,
-                )?,
-            ],
-            signing_keypairs,
+        let mut instruction = confidential_transfer::instruction::transfer_with_split_proofs(
+            &self.program_id,
+            source_account,
+            self.get_address(),
+            destination_account,
+            new_decryptable_available_balance.into(),
+            source_authority,
+            context_state_accounts,
+            source_decrypt_handles,
+        )?;
+        offchain::add_extra_account_metas(
+            &mut instruction,
+            source_account,
+            self.get_address(),
+            destination_account,
+            source_authority,
+            u64::MAX,
+            |address| {
+                self.client
+                    .get_account(address)
+                    .map_ok(|opt| opt.map(|acc| acc.data))
+            },
         )
         .await
+        .map_err(|_| TokenError::AccountNotFound)?;
+        self.process_ixs(&[instruction], signing_keypairs).await
     }
 
     /// Transfer tokens confidentially using split proofs in parallel
@@ -2199,16 +2372,32 @@ where
             .new_decryptable_available_balance(transfer_amount, source_aes_key)
             .map_err(|_| TokenError::AccountDecryption)?;
 
-        let transfer_instruction = confidential_transfer::instruction::transfer_with_split_proofs(
-            &self.program_id,
+        let mut transfer_instruction =
+            confidential_transfer::instruction::transfer_with_split_proofs(
+                &self.program_id,
+                source_account,
+                self.get_address(),
+                destination_account,
+                new_decryptable_available_balance.into(),
+                source_authority,
+                context_state_accounts,
+                &source_decrypt_handles,
+            )?;
+        offchain::add_extra_account_metas(
+            &mut transfer_instruction,
             source_account,
-            &self.pubkey,
+            self.get_address(),
             destination_account,
-            new_decryptable_available_balance.into(),
             source_authority,
-            context_state_accounts,
-            &source_decrypt_handles,
-        )?;
+            u64::MAX,
+            |address| {
+                self.client
+                    .get_account(address)
+                    .map_ok(|opt| opt.map(|acc| acc.data))
+            },
+        )
+        .await
+        .map_err(|_| TokenError::AccountNotFound)?;
 
         let transfer_with_equality_and_ciphertext_validity = self
             .create_equality_and_ciphertext_validity_proof_context_states_for_transfer_parallel(
@@ -2470,12 +2659,24 @@ where
 
         // This instruction is right at the transaction size limit, but in the
         // future it might be able to support the transfer too
-        self.process_ixs(
+        let blockhash = self
+            .client
+            .get_latest_blockhash()
+            .await
+            .map_err(TokenError::Client)?;
+
+        let transaction = Transaction::new_signed_with_payer(
             &[instruction_type
                 .encode_verify_proof(Some(range_proof_context_state_info), range_proof_data)],
-            &[] as &[&dyn Signer; 0],
-        )
-        .await
+            Some(&self.payer.pubkey()),
+            &[self.payer.as_ref()],
+            blockhash,
+        );
+
+        self.client
+            .send_transaction(&transaction)
+            .await
+            .map_err(TokenError::Client)
     }
 
     /// Create a range proof context state account with a confidential transfer
@@ -2620,20 +2821,32 @@ where
             .new_decryptable_available_balance(transfer_amount, source_aes_key)
             .map_err(|_| TokenError::AccountDecryption)?;
 
-        self.process_ixs(
-            &confidential_transfer::instruction::transfer_with_fee(
-                &self.program_id,
-                source_account,
-                destination_account,
-                &self.pubkey,
-                new_decryptable_available_balance,
-                source_authority,
-                &multisig_signers,
-                proof_location,
-            )?,
-            signing_keypairs,
+        let mut instructions = confidential_transfer::instruction::transfer_with_fee(
+            &self.program_id,
+            source_account,
+            destination_account,
+            self.get_address(),
+            new_decryptable_available_balance,
+            source_authority,
+            &multisig_signers,
+            proof_location,
+        )?;
+        offchain::add_extra_account_metas(
+            &mut instructions[0],
+            source_account,
+            self.get_address(),
+            destination_account,
+            source_authority,
+            u64::MAX,
+            |address| {
+                self.client
+                    .get_account(address)
+                    .map_ok(|opt| opt.map(|acc| acc.data))
+            },
         )
         .await
+        .map_err(|_| TokenError::AccountNotFound)?;
+        self.process_ixs(&instructions, signing_keypairs).await
     }
 
     /// Transfer tokens confidentially with fee using split proofs.
@@ -2666,22 +2879,33 @@ where
             .new_decryptable_available_balance(transfer_amount, source_aes_key)
             .map_err(|_| TokenError::AccountDecryption)?;
 
-        self.process_ixs(
-            &[
-                confidential_transfer::instruction::transfer_with_fee_and_split_proofs(
-                    &self.program_id,
-                    source_account,
-                    &self.pubkey,
-                    destination_account,
-                    new_decryptable_available_balance.into(),
-                    source_authority,
-                    context_state_accounts,
-                    source_decrypt_handles,
-                )?,
-            ],
-            signing_keypairs,
+        let mut instruction =
+            confidential_transfer::instruction::transfer_with_fee_and_split_proofs(
+                &self.program_id,
+                source_account,
+                self.get_address(),
+                destination_account,
+                new_decryptable_available_balance.into(),
+                source_authority,
+                context_state_accounts,
+                source_decrypt_handles,
+            )?;
+        offchain::add_extra_account_metas(
+            &mut instruction,
+            source_account,
+            self.get_address(),
+            destination_account,
+            source_authority,
+            u64::MAX,
+            |address| {
+                self.client
+                    .get_account(address)
+                    .map_ok(|opt| opt.map(|acc| acc.data))
+            },
         )
         .await
+        .map_err(|_| TokenError::AccountNotFound)?;
+        self.process_ixs(&[instruction], signing_keypairs).await
     }
 
     /// Transfer tokens confidentially using split proofs in parallel
@@ -2757,17 +2981,32 @@ where
             .new_decryptable_available_balance(transfer_amount, source_aes_key)
             .map_err(|_| TokenError::AccountDecryption)?;
 
-        let transfer_instruction =
+        let mut transfer_instruction =
             confidential_transfer::instruction::transfer_with_fee_and_split_proofs(
                 &self.program_id,
                 source_account,
-                &self.pubkey,
+                self.get_address(),
                 destination_account,
                 new_decryptable_available_balance.into(),
                 source_authority,
                 context_state_accounts,
                 &source_decrypt_handles,
             )?;
+        offchain::add_extra_account_metas(
+            &mut transfer_instruction,
+            source_account,
+            self.get_address(),
+            destination_account,
+            source_authority,
+            u64::MAX,
+            |address| {
+                self.client
+                    .get_account(address)
+                    .map_ok(|opt| opt.map(|acc| acc.data))
+            },
+        )
+        .await
+        .map_err(|_| TokenError::AccountNotFound)?;
 
         let transfer_with_equality_and_ciphertext_valdity = self
             .create_equality_and_ciphertext_validity_proof_context_states_for_transfer_with_fee_parallel(

@@ -1,6 +1,9 @@
 {
     "$schema": "https://turbo.build/schema.json",
-    "pipeline": {
+    "remoteCache": {
+        "signature": true
+    },
+    "tasks": {
         "build": {
             "dependsOn": ["^build"],
             "outputs": ["dist/**", "lib/**"]
@@ -10,19 +13,16 @@
         },
         "clean": {},
         "lint:fix": {
-            "inputs": ["src/**", "test/**"],
+            "inputs": ["tsconfig*.json", "src/**", "test/**"],
             "outputs": []
         },
         "lint": {
-            "inputs": ["src/**", "test/**"],
+            "inputs": ["tsconfig*.json", "src/**", "test/**"],
             "outputs": []
         },
         "test": {
             "inputs": ["src/**", "test/**"],
             "outputs": []
         }
-    },
-    "remoteCache": {
-        "signature": true
     }
 }

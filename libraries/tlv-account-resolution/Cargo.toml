@@ -1,6 +1,6 @@
 [package]
 name = "spl-tlv-account-resolution"
-version = "0.5.1"
+version = "0.6.5"
 description = "Solana Program Library TLV Account Resolution Interface"
 authors = ["Solana Labs Maintainers <maintainers@solanalabs.com>"]
 repository = "https://github.com/solana-labs/solana-program-library"
@@ -12,21 +12,20 @@ serde-traits = ["dep:serde"]
 test-sbf = []
 
 [dependencies]
-bytemuck = { version = "1.14.0", features = ["derive"] }
-serde = { version = "1.0.195", optional = true }
-solana-program = "1.17.6"
-spl-discriminator = { version = "0.1", path = "../discriminator" }
-spl-program-error = { version = "0.3", path = "../program-error" }
-spl-type-length-value = { version = "0.3", path = "../type-length-value" }
-spl-pod = { version = "0.1", path = "../pod" }
+bytemuck = { version = "1.16.1", features = ["derive"] }
+serde = { version = "1.0.203", optional = true }
+solana-program = "1.18.11"
+spl-discriminator = { version = "0.2.5", path = "../discriminator" }
+spl-program-error = { version = "0.4.4", path = "../program-error" }
+spl-type-length-value = { version = "0.4.6", path = "../type-length-value" }
+spl-pod = { version = "0.2.5", path = "../pod" }
 
 [dev-dependencies]
 futures = "0.3.30"
 futures-util = "0.3"
-solana-client = "1.17.6"
-solana-program-test = "1.17.6"
-solana-sdk = "1.17.6"
-spl-discriminator = { version = "0.1", path = "../discriminator" }
+solana-client = "1.18.11"
+solana-program-test = "1.18.11"
+solana-sdk = "1.18.11"
 
 [lib]
 crate-type = ["cdylib", "lib"]

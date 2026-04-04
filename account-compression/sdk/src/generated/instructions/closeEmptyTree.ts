@@ -27,10 +27,10 @@ export const closeEmptyTreeStruct = new beet.BeetArgsStruct<{
  * @category generated
  */
 export type CloseEmptyTreeInstructionAccounts = {
-    merkleTree: web3.PublicKey;
-    authority: web3.PublicKey;
-    recipient: web3.PublicKey;
     anchorRemainingAccounts?: web3.AccountMeta[];
+    authority: web3.PublicKey;
+    merkleTree: web3.PublicKey;
+    recipient: web3.PublicKey;
 };
 
 export const closeEmptyTreeInstructionDiscriminator = [50, 14, 219, 107, 78, 103, 16, 103];
@@ -45,7 +45,7 @@ export const closeEmptyTreeInstructionDiscriminator = [50, 14, 219, 107, 78, 103
  */
 export function createCloseEmptyTreeInstruction(
     accounts: CloseEmptyTreeInstructionAccounts,
-    programId = new web3.PublicKey('cmtDvXumGCrqC1Age74AVPhSRVXJMd8PJS91L8KbNCK')
+    programId = new web3.PublicKey('cmtDvXumGCrqC1Age74AVPhSRVXJMd8PJS91L8KbNCK'),
 ) {
     const [data] = closeEmptyTreeStruct.serialize({
         instructionDiscriminator: closeEmptyTreeInstructionDiscriminator,

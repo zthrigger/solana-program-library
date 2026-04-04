@@ -7,6 +7,9 @@ import { MULTISIG_SIZE } from '../state/multisig.js';
 import { ACCOUNT_TYPE_SIZE } from './accountType.js';
 import { CPI_GUARD_SIZE } from './cpiGuard/index.js';
 import { DEFAULT_ACCOUNT_STATE_SIZE } from './defaultAccountState/index.js';
+import { TOKEN_GROUP_SIZE, TOKEN_GROUP_MEMBER_SIZE } from './tokenGroup/index.js';
+import { GROUP_MEMBER_POINTER_SIZE } from './groupMemberPointer/state.js';
+import { GROUP_POINTER_SIZE } from './groupPointer/state.js';
 import { IMMUTABLE_OWNER_SIZE } from './immutableOwner.js';
 import { INTEREST_BEARING_MINT_CONFIG_STATE_SIZE } from './interestBearingMint/state.js';
 import { MEMO_TRANSFER_SIZE } from './memoTransfer/index.js';
@@ -40,6 +43,10 @@ export enum ExtensionType {
     // ConfidentialTransferFeeAmount, // Not implemented yet
     MetadataPointer = 18, // Remove number once above extensions implemented
     TokenMetadata = 19, // Remove number once above extensions implemented
+    GroupPointer = 20,
+    TokenGroup = 21,
+    GroupMemberPointer = 22,
+    TokenGroupMember = 23,
 }
 
 export const TYPE_SIZE = 2;
@@ -47,6 +54,15 @@ export const LENGTH_SIZE = 2;
 
 function addTypeAndLengthToLen(len: number): number {
     return len + TYPE_SIZE + LENGTH_SIZE;
+}
+
+function isVariableLengthExtension(e: ExtensionType): boolean {
+    switch (e) {
+        case ExtensionType.TokenMetadata:
+            return true;
+        default:
+            return false;
+    }
 }
 
 // NOTE: All of these should eventually use their type's Span instead of these
@@ -62,9 +78,9 @@ export function getTypeLen(e: ExtensionType): number {
         case ExtensionType.MintCloseAuthority:
             return MINT_CLOSE_AUTHORITY_SIZE;
         case ExtensionType.ConfidentialTransferMint:
-            return 97;
+            return 65;
         case ExtensionType.ConfidentialTransferAccount:
-            return 286;
+            return 295;
         case ExtensionType.CpiGuard:
             return CPI_GUARD_SIZE;
         case ExtensionType.DefaultAccountState:
@@ -87,6 +103,14 @@ export function getTypeLen(e: ExtensionType): number {
             return TRANSFER_HOOK_SIZE;
         case ExtensionType.TransferHookAccount:
             return TRANSFER_HOOK_ACCOUNT_SIZE;
+        case ExtensionType.GroupPointer:
+            return GROUP_POINTER_SIZE;
+        case ExtensionType.GroupMemberPointer:
+            return GROUP_MEMBER_POINTER_SIZE;
+        case ExtensionType.TokenGroup:
+            return TOKEN_GROUP_SIZE;
+        case ExtensionType.TokenGroupMember:
+            return TOKEN_GROUP_MEMBER_SIZE;
         case ExtensionType.TokenMetadata:
             throw Error(`Cannot get type length for variable extension type: ${e}`);
         default:
@@ -106,6 +130,10 @@ export function isMintExtension(e: ExtensionType): boolean {
         case ExtensionType.TransferHook:
         case ExtensionType.MetadataPointer:
         case ExtensionType.TokenMetadata:
+        case ExtensionType.GroupPointer:
+        case ExtensionType.GroupMemberPointer:
+        case ExtensionType.TokenGroup:
+        case ExtensionType.TokenGroupMember:
             return true;
         case ExtensionType.Uninitialized:
         case ExtensionType.TransferFeeAmount:
@@ -142,6 +170,10 @@ export function isAccountExtension(e: ExtensionType): boolean {
         case ExtensionType.TransferHook:
         case ExtensionType.MetadataPointer:
         case ExtensionType.TokenMetadata:
+        case ExtensionType.GroupPointer:
+        case ExtensionType.GroupMemberPointer:
+        case ExtensionType.TokenGroup:
+        case ExtensionType.TokenGroupMember:
             return false;
         default:
             throw Error(`Unknown extension type: ${e}`);
@@ -172,12 +204,20 @@ export function getAccountTypeOfMintType(e: ExtensionType): ExtensionType {
         case ExtensionType.PermanentDelegate:
         case ExtensionType.NonTransferableAccount:
         case ExtensionType.TransferHookAccount:
+        case ExtensionType.GroupPointer:
+        case ExtensionType.GroupMemberPointer:
+        case ExtensionType.TokenGroup:
+        case ExtensionType.TokenGroupMember:
             return ExtensionType.Uninitialized;
     }
 }
 
-function getLen(extensionTypes: ExtensionType[], baseSize: number): number {
-    if (extensionTypes.length === 0) {
+function getLen(
+    extensionTypes: ExtensionType[],
+    baseSize: number,
+    variableLengthExtensions: { [E in ExtensionType]?: number } = {}
+): number {
+    if (extensionTypes.length === 0 && Object.keys(variableLengthExtensions).length === 0) {
         return baseSize;
     } else {
         const accountLength =
@@ -186,7 +226,15 @@ function getLen(extensionTypes: ExtensionType[], baseSize: number): number {
             extensionTypes
                 .filter((element, i) => i === extensionTypes.indexOf(element))
                 .map((element) => addTypeAndLengthToLen(getTypeLen(element)))
-                .reduce((a, b) => a + b);
+                .reduce((a, b) => a + b, 0) +
+            Object.entries(variableLengthExtensions)
+                .map(([extension, len]) => {
+                    if (!isVariableLengthExtension(Number(extension))) {
+                        throw Error(`Extension ${extension} is not variable length`);
+                    }
+                    return addTypeAndLengthToLen(len);
+                })
+                .reduce((a, b) => a + b, 0);
         if (accountLength === MULTISIG_SIZE) {
             return accountLength + TYPE_SIZE;
         } else {
@@ -195,11 +243,15 @@ function getLen(extensionTypes: ExtensionType[], baseSize: number): number {
     }
 }
 
-export function getMintLen(extensionTypes: ExtensionType[]): number {
-    return getLen(extensionTypes, MINT_SIZE);
+export function getMintLen(
+    extensionTypes: ExtensionType[],
+    variableLengthExtensions: { [E in ExtensionType]?: number } = {}
+): number {
+    return getLen(extensionTypes, MINT_SIZE, variableLengthExtensions);
 }
 
 export function getAccountLen(extensionTypes: ExtensionType[]): number {
+    // There are currently no variable length extensions for accounts
     return getLen(extensionTypes, ACCOUNT_SIZE);
 }
 

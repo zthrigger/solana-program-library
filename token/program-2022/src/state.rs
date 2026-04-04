@@ -16,6 +16,14 @@ use {
     },
 };
 
+/// Simplified version of the `Pack` trait which only gives the size of the
+/// packed struct. Useful when a function doesn't need a type to implement all
+/// of `Pack`, but a size is still needed.
+pub trait PackedSizeOf {
+    /// The packed size of the struct
+    const SIZE_OF: usize;
+}
+
 /// Mint data.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -85,6 +93,9 @@ impl Pack for Mint {
         is_initialized_dst[0] = is_initialized as u8;
         pack_coption_key(freeze_authority, freeze_authority_dst);
     }
+}
+impl PackedSizeOf for Mint {
+    const SIZE_OF: usize = Self::LEN;
 }
 
 /// Account data.
@@ -184,6 +195,9 @@ impl Pack for Account {
         pack_coption_key(close_authority, close_authority_dst);
     }
 }
+impl PackedSizeOf for Account {
+    const SIZE_OF: usize = Self::LEN;
+}
 
 /// Account state.
 #[repr(u8)]
@@ -254,6 +268,9 @@ impl Pack for Multisig {
         }
     }
 }
+impl PackedSizeOf for Multisig {
+    const SIZE_OF: usize = Self::LEN;
+}
 
 // Helpers
 pub(crate) fn pack_coption_key(src: &COption<Pubkey>, dst: &mut [u8; 36]) {
@@ -303,12 +320,9 @@ impl GenericTokenAccount for Account {
     fn valid_account_data(account_data: &[u8]) -> bool {
         // Use spl_token::state::Account::valid_account_data once possible
         account_data.len() == Account::LEN && is_initialized_account(account_data)
-            || (account_data.len() >= Account::LEN
+            || (account_data.len() > Account::LEN
                 && account_data.len() != Multisig::LEN
-                && ACCOUNTTYPE_ACCOUNT
-                    == *account_data
-                        .get(spl_token::state::Account::get_packed_len())
-                        .unwrap_or(&(AccountType::Uninitialized as u8))
+                && ACCOUNTTYPE_ACCOUNT == account_data[Account::LEN]
                 && is_initialized_account(account_data))
     }
 }
@@ -347,6 +361,39 @@ pub(crate) mod test {
         4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 2, 1, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0,
         0, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
         7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    ];
+    pub const TEST_MULTISIG: Multisig = Multisig {
+        m: 1,
+        n: 11,
+        is_initialized: true,
+        signers: [
+            Pubkey::new_from_array([1; 32]),
+            Pubkey::new_from_array([2; 32]),
+            Pubkey::new_from_array([3; 32]),
+            Pubkey::new_from_array([4; 32]),
+            Pubkey::new_from_array([5; 32]),
+            Pubkey::new_from_array([6; 32]),
+            Pubkey::new_from_array([7; 32]),
+            Pubkey::new_from_array([8; 32]),
+            Pubkey::new_from_array([9; 32]),
+            Pubkey::new_from_array([10; 32]),
+            Pubkey::new_from_array([11; 32]),
+        ],
+    };
+    pub const TEST_MULTISIG_SLICE: &[u8] = &[
+        1, 11, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+        3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+        4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+        5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+        6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+        8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9,
+        9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 10,
+        10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+        10, 10, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+        11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
     ];
 
     #[test]
@@ -389,12 +436,7 @@ pub(crate) mod test {
         assert_eq!(unpacked, check);
 
         // Multisig
-        let check = Multisig {
-            m: 1,
-            n: 2,
-            is_initialized: true,
-            signers: [Pubkey::new_from_array([3; 32]); MAX_SIGNERS],
-        };
+        let check = TEST_MULTISIG;
         let mut packed = vec![0; Multisig::get_packed_len() + 1];
         assert_eq!(
             Err(ProgramError::InvalidAccountData),
@@ -407,21 +449,7 @@ pub(crate) mod test {
         );
         let mut packed = vec![0; Multisig::get_packed_len()];
         Multisig::pack(check, &mut packed).unwrap();
-        let expect = vec![
-            1, 2, 1, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
-            3, 3, 3, 3, 3, 3, 3,
-        ];
+        let expect = TEST_MULTISIG_SLICE;
         assert_eq!(packed, expect);
         let unpacked = Multisig::unpack(&packed).unwrap();
         assert_eq!(unpacked, check);

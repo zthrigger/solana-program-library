@@ -1,7 +1,7 @@
 {
     "name": "@solana/spl-token-metadata",
     "description": "SPL Token Metadata Interface JS API",
-    "version": "0.1.2",
+    "version": "0.1.3",
     "author": "Solana Labs Maintainers <maintainers@solanalabs.com>",
     "repository": "https://github.com/solana-labs/solana-program-library",
     "license": "Apache-2.0",
@@ -44,35 +44,31 @@
         "watch": "tsc --build --verbose --watch tsconfig.all.json"
     },
     "peerDependencies": {
-        "@solana/web3.js": "^1.88.0"
+        "@solana/web3.js": "^1.93.0"
     },
     "dependencies": {
-        "@solana/codecs-core": "2.0.0-experimental.9741939",
-        "@solana/codecs-data-structures": "2.0.0-experimental.9741939",
-        "@solana/codecs-numbers": "2.0.0-experimental.9741939",
-        "@solana/codecs-strings": "2.0.0-experimental.9741939",
-        "@solana/options": "2.0.0-experimental.9741939",
+        "@solana/codecs": "2.0.0-preview.3",
         "@solana/spl-type-length-value": "0.1.0"
     },
     "devDependencies": {
-        "@solana/web3.js": "^1.88.0",
-        "@types/chai": "^4.3.11",
-        "@types/mocha": "^10.0.6",
-        "@types/node": "^20.10.7",
-        "@typescript-eslint/eslint-plugin": "^6.18.0",
-        "@typescript-eslint/parser": "^6.18.0",
-        "chai": "^4.3.6",
-        "eslint": "^8.56.0",
+        "@solana/web3.js": "^1.93.0",
+        "@types/chai": "^4.3.16",
+        "@types/mocha": "^10.0.7",
+        "@types/node": "^20.14.8",
+        "@typescript-eslint/eslint-plugin": "^7.13.1",
+        "@typescript-eslint/parser": "^7.13.1",
+        "chai": "^5.1.1",
+        "eslint": "^8.57.0",
         "eslint-config-prettier": "^9.1.0",
-        "eslint-plugin-prettier": "^5.1.2",
+        "eslint-plugin-prettier": "^5.1.3",
         "eslint-plugin-require-extensions": "^0.1.1",
         "gh-pages": "^6.1.1",
-        "mocha": "^10.1.0",
-        "prettier": "^3.1.1",
+        "mocha": "^10.4.0",
+        "prettier": "^3.3.2",
         "shx": "^0.3.4",
         "ts-node": "^10.9.2",
-        "tslib": "^2.3.1",
-        "typedoc": "^0.25.7",
-        "typescript": "^5.3.3"
+        "tslib": "^2.6.3",
+        "typedoc": "^0.26.2",
+        "typescript": "^5.4.5"
     }
 }

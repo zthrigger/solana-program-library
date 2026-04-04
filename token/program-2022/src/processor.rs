@@ -2,7 +2,7 @@
 
 use {
     crate::{
-        check_program_account, cmp_pubkeys,
+        check_program_account,
         error::TokenError,
         extension::{
             confidential_transfer::{self, ConfidentialTransferAccount, ConfidentialTransferMint},
@@ -23,12 +23,20 @@ use {
             reallocate, token_group, token_metadata,
             transfer_fee::{self, TransferFeeAmount, TransferFeeConfig},
             transfer_hook::{self, TransferHook, TransferHookAccount},
-            AccountType, BaseStateWithExtensions, ExtensionType, StateWithExtensions,
-            StateWithExtensionsMut,
+            AccountType, BaseStateWithExtensions, BaseStateWithExtensionsMut, ExtensionType,
+            PodStateWithExtensions, PodStateWithExtensionsMut,
         },
-        instruction::{is_valid_signer_index, AuthorityType, TokenInstruction, MAX_SIGNERS},
+        instruction::{
+            decode_instruction_data, decode_instruction_type, is_valid_signer_index, AuthorityType,
+            MAX_SIGNERS,
+        },
         native_mint,
-        state::{Account, AccountState, Mint, Multisig},
+        pod::{PodAccount, PodCOption, PodMint, PodMultisig},
+        pod_instruction::{
+            decode_instruction_data_with_coption_pubkey, AmountCheckedData, AmountData,
+            InitializeMintData, InitializeMultisigData, PodTokenInstruction, SetAuthorityData,
+        },
+        state::{Account, AccountState, Mint, PackedSizeOf},
     },
     solana_program::{
         account_info::{next_account_info, AccountInfo},
@@ -37,11 +45,14 @@ use {
         msg,
         program::{invoke, invoke_signed, set_return_data},
         program_error::ProgramError,
-        program_option::COption,
         program_pack::Pack,
         pubkey::Pubkey,
         system_instruction, system_program,
         sysvar::{rent::Rent, Sysvar},
+    },
+    spl_pod::{
+        bytemuck::{pod_from_bytes, pod_from_bytes_mut},
+        primitives::{PodBool, PodU64},
     },
     spl_token_group_interface::instruction::TokenGroupInstruction,
     spl_token_metadata_interface::instruction::TokenMetadataInstruction,
@@ -54,8 +65,8 @@ impl Processor {
     fn _process_initialize_mint(
         accounts: &[AccountInfo],
         decimals: u8,
-        mint_authority: Pubkey,
-        freeze_authority: COption<Pubkey>,
+        mint_authority: &Pubkey,
+        freeze_authority: PodCOption<Pubkey>,
         rent_sysvar_account: bool,
     ) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
@@ -72,7 +83,7 @@ impl Processor {
             return Err(TokenError::NotRentExempt.into());
         }
 
-        let mut mint = StateWithExtensionsMut::<Mint>::unpack_uninitialized(&mut mint_data)?;
+        let mut mint = PodStateWithExtensionsMut::<PodMint>::unpack_uninitialized(&mut mint_data)?;
         let extension_types = mint.get_extension_types()?;
         if ExtensionType::try_calculate_account_len::<Mint>(&extension_types)? != mint_data_len {
             return Err(ProgramError::InvalidAccountData);
@@ -87,11 +98,10 @@ impl Processor {
             }
         }
 
-        mint.base.mint_authority = COption::Some(mint_authority);
+        mint.base.mint_authority = PodCOption::some(*mint_authority);
         mint.base.decimals = decimals;
-        mint.base.is_initialized = true;
+        mint.base.is_initialized = PodBool::from_bool(true);
         mint.base.freeze_authority = freeze_authority;
-        mint.pack_base();
         mint.init_account_type()?;
 
         Ok(())
@@ -101,8 +111,8 @@ impl Processor {
     pub fn process_initialize_mint(
         accounts: &[AccountInfo],
         decimals: u8,
-        mint_authority: Pubkey,
-        freeze_authority: COption<Pubkey>,
+        mint_authority: &Pubkey,
+        freeze_authority: PodCOption<Pubkey>,
     ) -> ProgramResult {
         Self::_process_initialize_mint(accounts, decimals, mint_authority, freeze_authority, true)
     }
@@ -111,8 +121,8 @@ impl Processor {
     pub fn process_initialize_mint2(
         accounts: &[AccountInfo],
         decimals: u8,
-        mint_authority: Pubkey,
-        freeze_authority: COption<Pubkey>,
+        mint_authority: &Pubkey,
+        freeze_authority: PodCOption<Pubkey>,
     ) -> ProgramResult {
         Self::_process_initialize_mint(accounts, decimals, mint_authority, freeze_authority, false)
     }
@@ -140,7 +150,7 @@ impl Processor {
         let mut account_data = new_account_info.data.borrow_mut();
         // unpack_uninitialized checks account.base.is_initialized() under the hood
         let mut account =
-            StateWithExtensionsMut::<Account>::unpack_uninitialized(&mut account_data)?;
+            PodStateWithExtensionsMut::<PodAccount>::unpack_uninitialized(&mut account_data)?;
 
         if !rent.is_exempt(new_account_info.lamports(), new_account_info_data_len) {
             return Err(TokenError::NotRentExempt.into());
@@ -148,7 +158,7 @@ impl Processor {
 
         // get_required_account_extensions checks mint validity
         let mint_data = mint_info.data.borrow();
-        let mint = StateWithExtensions::<Mint>::unpack(&mint_data)
+        let mint = PodStateWithExtensions::<PodMint>::unpack(&mint_data)
             .map_err(|_| Into::<ProgramError>::into(TokenError::InvalidMint))?;
         if mint
             .get_extension::<PermanentDelegate>()
@@ -178,23 +188,23 @@ impl Processor {
 
         account.base.mint = *mint_info.key;
         account.base.owner = *owner;
-        account.base.close_authority = COption::None;
-        account.base.delegate = COption::None;
-        account.base.delegated_amount = 0;
-        account.base.state = starting_state;
-        if cmp_pubkeys(mint_info.key, &native_mint::id()) {
+        account.base.close_authority = PodCOption::none();
+        account.base.delegate = PodCOption::none();
+        account.base.delegated_amount = 0.into();
+        account.base.state = starting_state.into();
+        if mint_info.key == &native_mint::id() {
             let rent_exempt_reserve = rent.minimum_balance(new_account_info_data_len);
-            account.base.is_native = COption::Some(rent_exempt_reserve);
+            account.base.is_native = PodCOption::some(rent_exempt_reserve.into());
             account.base.amount = new_account_info
                 .lamports()
                 .checked_sub(rent_exempt_reserve)
-                .ok_or(TokenError::Overflow)?;
+                .ok_or(TokenError::Overflow)?
+                .into();
         } else {
-            account.base.is_native = COption::None;
-            account.base.amount = 0;
+            account.base.is_native = PodCOption::none();
+            account.base.amount = 0.into();
         };
 
-        account.pack_base();
         account.init_account_type()?;
 
         Ok(())
@@ -208,14 +218,14 @@ impl Processor {
 
     /// Processes an [InitializeAccount2](enum.TokenInstruction.html)
     /// instruction.
-    pub fn process_initialize_account2(accounts: &[AccountInfo], owner: Pubkey) -> ProgramResult {
-        Self::_process_initialize_account(accounts, Some(&owner), true)
+    pub fn process_initialize_account2(accounts: &[AccountInfo], owner: &Pubkey) -> ProgramResult {
+        Self::_process_initialize_account(accounts, Some(owner), true)
     }
 
     /// Processes an [InitializeAccount3](enum.TokenInstruction.html)
     /// instruction.
-    pub fn process_initialize_account3(accounts: &[AccountInfo], owner: Pubkey) -> ProgramResult {
-        Self::_process_initialize_account(accounts, Some(&owner), false)
+    pub fn process_initialize_account3(accounts: &[AccountInfo], owner: &Pubkey) -> ProgramResult {
+        Self::_process_initialize_account(accounts, Some(owner), false)
     }
 
     fn _process_initialize_multisig(
@@ -232,8 +242,9 @@ impl Processor {
             Rent::get()?
         };
 
-        let mut multisig = Multisig::unpack_unchecked(&multisig_info.data.borrow())?;
-        if multisig.is_initialized {
+        let mut multisig_data = multisig_info.data.borrow_mut();
+        let multisig = pod_from_bytes_mut::<PodMultisig>(&mut multisig_data)?;
+        if bool::from(multisig.is_initialized) {
             return Err(TokenError::AlreadyInUse.into());
         }
 
@@ -253,9 +264,7 @@ impl Processor {
         for (i, signer_info) in signer_infos.iter().enumerate() {
             multisig.signers[i] = *signer_info.key;
         }
-        multisig.is_initialized = true;
-
-        Multisig::pack(multisig, &mut multisig_info.data.borrow_mut())?;
+        multisig.is_initialized = true.into();
 
         Ok(())
     }
@@ -287,6 +296,9 @@ impl Processor {
         let expected_mint_info = if let Some(expected_decimals) = expected_decimals {
             Some((next_account_info(account_info_iter)?, expected_decimals))
         } else {
+            // Transfer must not be called with an expected fee but no mint,
+            // otherwise it's a programmer error.
+            assert!(expected_fee.is_none());
             None
         };
 
@@ -296,11 +308,12 @@ impl Processor {
 
         let mut source_account_data = source_account_info.data.borrow_mut();
         let mut source_account =
-            StateWithExtensionsMut::<Account>::unpack(&mut source_account_data)?;
+            PodStateWithExtensionsMut::<PodAccount>::unpack(&mut source_account_data)?;
         if source_account.base.is_frozen() {
             return Err(TokenError::AccountFrozen.into());
         }
-        if source_account.base.amount < amount {
+        let source_amount = u64::from(source_account.base.amount);
+        if source_amount < amount {
             return Err(TokenError::InsufficientFunds.into());
         }
         if source_account
@@ -311,12 +324,12 @@ impl Processor {
         }
         let (fee, maybe_permanent_delegate, maybe_transfer_hook_program_id) =
             if let Some((mint_info, expected_decimals)) = expected_mint_info {
-                if !cmp_pubkeys(&source_account.base.mint, mint_info.key) {
+                if &source_account.base.mint != mint_info.key {
                     return Err(TokenError::MintMismatch.into());
                 }
 
                 let mint_data = mint_info.try_borrow_data()?;
-                let mint = StateWithExtensions::<Mint>::unpack(&mint_data)?;
+                let mint = PodStateWithExtensions::<PodMint>::unpack(&mint_data)?;
 
                 if expected_decimals != mint.base.decimals {
                     return Err(TokenError::MintDecimalsMismatch.into());
@@ -367,36 +380,52 @@ impl Processor {
             }
         }
 
-        let self_transfer = cmp_pubkeys(source_account_info.key, destination_account_info.key);
-        match (source_account.base.delegate, maybe_permanent_delegate) {
-            (_, Some(ref delegate)) if cmp_pubkeys(authority_info.key, delegate) => {
-                Self::validate_owner(
-                    program_id,
-                    delegate,
-                    authority_info,
-                    authority_info_data_len,
-                    account_info_iter.as_slice(),
-                )?
+        let self_transfer = source_account_info.key == destination_account_info.key;
+        if let Ok(cpi_guard) = source_account.get_extension::<CpiGuard>() {
+            // Blocks all cases where the authority has signed if CPI Guard is
+            // enabled, including:
+            // * the account is delegated to the owner
+            // * the account owner is the permanent delegate
+            if *authority_info.key == source_account.base.owner
+                && cpi_guard.lock_cpi.into()
+                && in_cpi()
+            {
+                return Err(TokenError::CpiGuardTransferBlocked.into());
             }
-            (COption::Some(ref delegate), _) if cmp_pubkeys(authority_info.key, delegate) => {
+        }
+        match (source_account.base.delegate, maybe_permanent_delegate) {
+            (_, Some(ref delegate)) if authority_info.key == delegate => Self::validate_owner(
+                program_id,
+                delegate,
+                authority_info,
+                authority_info_data_len,
+                account_info_iter.as_slice(),
+            )?,
+            (
+                PodCOption {
+                    option: PodCOption::<Pubkey>::SOME,
+                    value: delegate,
+                },
+                _,
+            ) if authority_info.key == &delegate => {
                 Self::validate_owner(
                     program_id,
-                    delegate,
+                    &delegate,
                     authority_info,
                     authority_info_data_len,
                     account_info_iter.as_slice(),
                 )?;
-                if source_account.base.delegated_amount < amount {
+                let delegated_amount = u64::from(source_account.base.delegated_amount);
+                if delegated_amount < amount {
                     return Err(TokenError::InsufficientFunds.into());
                 }
                 if !self_transfer {
-                    source_account.base.delegated_amount = source_account
-                        .base
-                        .delegated_amount
+                    source_account.base.delegated_amount = delegated_amount
                         .checked_sub(amount)
-                        .ok_or(TokenError::Overflow)?;
-                    if source_account.base.delegated_amount == 0 {
-                        source_account.base.delegate = COption::None;
+                        .ok_or(TokenError::Overflow)?
+                        .into();
+                    if u64::from(source_account.base.delegated_amount) == 0 {
+                        source_account.base.delegate = PodCOption::none();
                     }
                 }
             }
@@ -408,12 +437,6 @@ impl Processor {
                     authority_info_data_len,
                     account_info_iter.as_slice(),
                 )?;
-
-                if let Ok(cpi_guard) = source_account.get_extension::<CpiGuard>() {
-                    if cpi_guard.lock_cpi.into() && in_cpi() {
-                        return Err(TokenError::CpiGuardTransferBlocked.into());
-                    }
-                }
             }
         }
 
@@ -432,12 +455,12 @@ impl Processor {
         // self-transfer was dealt with earlier, so this *should* be safe
         let mut destination_account_data = destination_account_info.data.borrow_mut();
         let mut destination_account =
-            StateWithExtensionsMut::<Account>::unpack(&mut destination_account_data)?;
+            PodStateWithExtensionsMut::<PodAccount>::unpack(&mut destination_account_data)?;
 
         if destination_account.base.is_frozen() {
             return Err(TokenError::AccountFrozen.into());
         }
-        if !cmp_pubkeys(&source_account.base.mint, &destination_account.base.mint) {
+        if source_account.base.mint != destination_account.base.mint {
             return Err(TokenError::MintMismatch.into());
         }
 
@@ -451,17 +474,15 @@ impl Processor {
             confidential_transfer_state.non_confidential_transfer_allowed()?
         }
 
-        source_account.base.amount = source_account
-            .base
-            .amount
+        source_account.base.amount = source_amount
             .checked_sub(amount)
-            .ok_or(TokenError::Overflow)?;
+            .ok_or(TokenError::Overflow)?
+            .into();
         let credited_amount = amount.checked_sub(fee).ok_or(TokenError::Overflow)?;
-        destination_account.base.amount = destination_account
-            .base
-            .amount
+        destination_account.base.amount = u64::from(destination_account.base.amount)
             .checked_add(credited_amount)
-            .ok_or(TokenError::Overflow)?;
+            .ok_or(TokenError::Overflow)?
+            .into();
         if fee > 0 {
             if let Ok(extension) = destination_account.get_extension_mut::<TransferFeeAmount>() {
                 let new_withheld_amount = u64::from(extension.withheld_amount)
@@ -487,9 +508,6 @@ impl Processor {
                 .checked_add(amount)
                 .ok_or(TokenError::Overflow)?;
         }
-
-        source_account.pack_base();
-        destination_account.pack_base();
 
         if let Some(program_id) = maybe_transfer_hook_program_id {
             if let Some((mint_info, _)) = expected_mint_info {
@@ -542,20 +560,20 @@ impl Processor {
         let owner_info_data_len = owner_info.data_len();
 
         let mut source_account_data = source_account_info.data.borrow_mut();
-        let mut source_account =
-            StateWithExtensionsMut::<Account>::unpack(&mut source_account_data)?;
+        let source_account =
+            PodStateWithExtensionsMut::<PodAccount>::unpack(&mut source_account_data)?;
 
         if source_account.base.is_frozen() {
             return Err(TokenError::AccountFrozen.into());
         }
 
         if let Some((mint_info, expected_decimals)) = expected_mint_info {
-            if !cmp_pubkeys(&source_account.base.mint, mint_info.key) {
+            if &source_account.base.mint != mint_info.key {
                 return Err(TokenError::MintMismatch.into());
             }
 
             let mint_data = mint_info.data.borrow();
-            let mint = StateWithExtensions::<Mint>::unpack(&mint_data)?;
+            let mint = PodStateWithExtensions::<PodMint>::unpack(&mint_data)?;
             if expected_decimals != mint.base.decimals {
                 return Err(TokenError::MintDecimalsMismatch.into());
             }
@@ -575,9 +593,8 @@ impl Processor {
             }
         }
 
-        source_account.base.delegate = COption::Some(*delegate_info.key);
-        source_account.base.delegated_amount = amount;
-        source_account.pack_base();
+        source_account.base.delegate = PodCOption::some(*delegate_info.key);
+        source_account.base.delegated_amount = amount.into();
 
         Ok(())
     }
@@ -590,18 +607,19 @@ impl Processor {
         let authority_info_data_len = authority_info.data_len();
 
         let mut source_account_data = source_account_info.data.borrow_mut();
-        let mut source_account =
-            StateWithExtensionsMut::<Account>::unpack(&mut source_account_data)?;
+        let source_account =
+            PodStateWithExtensionsMut::<PodAccount>::unpack(&mut source_account_data)?;
         if source_account.base.is_frozen() {
             return Err(TokenError::AccountFrozen.into());
         }
 
         Self::validate_owner(
             program_id,
-            match source_account.base.delegate {
-                COption::Some(ref delegate) if cmp_pubkeys(authority_info.key, delegate) => {
-                    delegate
-                }
+            match &source_account.base.delegate {
+                PodCOption {
+                    option: PodCOption::<Pubkey>::SOME,
+                    value: delegate,
+                } if authority_info.key == delegate => delegate,
                 _ => &source_account.base.owner,
             },
             authority_info,
@@ -609,9 +627,8 @@ impl Processor {
             account_info_iter.as_slice(),
         )?;
 
-        source_account.base.delegate = COption::None;
-        source_account.base.delegated_amount = 0;
-        source_account.pack_base();
+        source_account.base.delegate = PodCOption::none();
+        source_account.base.delegated_amount = 0.into();
 
         Ok(())
     }
@@ -621,7 +638,7 @@ impl Processor {
         program_id: &Pubkey,
         accounts: &[AccountInfo],
         authority_type: AuthorityType,
-        new_authority: COption<Pubkey>,
+        new_authority: PodCOption<Pubkey>,
     ) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
         let account_info = next_account_info(account_info_iter)?;
@@ -629,7 +646,8 @@ impl Processor {
         let authority_info_data_len = authority_info.data_len();
 
         let mut account_data = account_info.data.borrow_mut();
-        if let Ok(mut account) = StateWithExtensionsMut::<Account>::unpack(&mut account_data) {
+        if let Ok(mut account) = PodStateWithExtensionsMut::<PodAccount>::unpack(&mut account_data)
+        {
             if account.base.is_frozen() {
                 return Err(TokenError::AccountFrozen.into());
             }
@@ -656,17 +674,21 @@ impl Processor {
                         }
                     }
 
-                    if let COption::Some(authority) = new_authority {
+                    if let PodCOption {
+                        option: PodCOption::<Pubkey>::SOME,
+                        value: authority,
+                    } = new_authority
+                    {
                         account.base.owner = authority;
                     } else {
                         return Err(TokenError::InvalidInstruction.into());
                     }
 
-                    account.base.delegate = COption::None;
-                    account.base.delegated_amount = 0;
+                    account.base.delegate = PodCOption::none();
+                    account.base.delegated_amount = 0.into();
 
                     if account.base.is_native() {
-                        account.base.close_authority = COption::None;
+                        account.base.close_authority = PodCOption::none();
                     }
                 }
                 AuthorityType::CloseAccount => {
@@ -680,7 +702,7 @@ impl Processor {
                     )?;
 
                     if let Ok(cpi_guard) = account.get_extension::<CpiGuard>() {
-                        if cpi_guard.lock_cpi.into() && in_cpi() && new_authority != COption::None {
+                        if cpi_guard.lock_cpi.into() && in_cpi() && new_authority.is_some() {
                             return Err(TokenError::CpiGuardSetAuthorityBlocked.into());
                         }
                     }
@@ -691,8 +713,8 @@ impl Processor {
                     return Err(TokenError::AuthorityTypeNotSupported.into());
                 }
             }
-            account.pack_base();
-        } else if let Ok(mut mint) = StateWithExtensionsMut::<Mint>::unpack(&mut account_data) {
+        } else if let Ok(mut mint) = PodStateWithExtensionsMut::<PodMint>::unpack(&mut account_data)
+        {
             match authority_type {
                 AuthorityType::MintTokens => {
                     // Once a mint's supply is fixed, it cannot be undone by setting a new
@@ -709,7 +731,6 @@ impl Processor {
                         account_info_iter.as_slice(),
                     )?;
                     mint.base.mint_authority = new_authority;
-                    mint.pack_base();
                 }
                 AuthorityType::FreezeAccount => {
                     // Once a mint's freeze authority is disabled, it cannot be re-enabled by
@@ -726,7 +747,6 @@ impl Processor {
                         account_info_iter.as_slice(),
                     )?;
                     mint.base.freeze_authority = new_authority;
-                    mint.pack_base();
                 }
                 AuthorityType::CloseMint => {
                     let extension = mint.get_extension_mut::<MintCloseAuthority>()?;
@@ -905,8 +925,8 @@ impl Processor {
         let owner_info_data_len = owner_info.data_len();
 
         let mut destination_account_data = destination_account_info.data.borrow_mut();
-        let mut destination_account =
-            StateWithExtensionsMut::<Account>::unpack(&mut destination_account_data)?;
+        let destination_account =
+            PodStateWithExtensionsMut::<PodAccount>::unpack(&mut destination_account_data)?;
         if destination_account.base.is_frozen() {
             return Err(TokenError::AccountFrozen.into());
         }
@@ -914,12 +934,12 @@ impl Processor {
         if destination_account.base.is_native() {
             return Err(TokenError::NativeNotSupported.into());
         }
-        if !cmp_pubkeys(mint_info.key, &destination_account.base.mint) {
+        if mint_info.key != &destination_account.base.mint {
             return Err(TokenError::MintMismatch.into());
         }
 
         let mut mint_data = mint_info.data.borrow_mut();
-        let mut mint = StateWithExtensionsMut::<Mint>::unpack(&mut mint_data)?;
+        let mint = PodStateWithExtensionsMut::<PodMint>::unpack(&mut mint_data)?;
 
         // If the mint if non-transferable, only allow minting to accounts
         // with immutable ownership.
@@ -937,15 +957,18 @@ impl Processor {
             }
         }
 
-        match mint.base.mint_authority {
-            COption::Some(mint_authority) => Self::validate_owner(
+        match &mint.base.mint_authority {
+            PodCOption {
+                option: PodCOption::<Pubkey>::SOME,
+                value: mint_authority,
+            } => Self::validate_owner(
                 program_id,
-                &mint_authority,
+                mint_authority,
                 owner_info,
                 owner_info_data_len,
                 account_info_iter.as_slice(),
             )?,
-            COption::None => return Err(TokenError::FixedSupply.into()),
+            _ => return Err(TokenError::FixedSupply.into()),
         }
 
         // Revisit this later to see if it's worth adding a check to reduce
@@ -954,20 +977,15 @@ impl Processor {
         check_program_account(mint_info.owner)?;
         check_program_account(destination_account_info.owner)?;
 
-        destination_account.base.amount = destination_account
-            .base
-            .amount
+        destination_account.base.amount = u64::from(destination_account.base.amount)
             .checked_add(amount)
-            .ok_or(TokenError::Overflow)?;
+            .ok_or(TokenError::Overflow)?
+            .into();
 
-        mint.base.supply = mint
-            .base
-            .supply
+        mint.base.supply = u64::from(mint.base.supply)
             .checked_add(amount)
-            .ok_or(TokenError::Overflow)?;
-
-        mint.pack_base();
-        destination_account.pack_base();
+            .ok_or(TokenError::Overflow)?
+            .into();
 
         Ok(())
     }
@@ -987,10 +1005,10 @@ impl Processor {
         let authority_info_data_len = authority_info.data_len();
 
         let mut source_account_data = source_account_info.data.borrow_mut();
-        let mut source_account =
-            StateWithExtensionsMut::<Account>::unpack(&mut source_account_data)?;
+        let source_account =
+            PodStateWithExtensionsMut::<PodAccount>::unpack(&mut source_account_data)?;
         let mut mint_data = mint_info.data.borrow_mut();
-        let mut mint = StateWithExtensionsMut::<Mint>::unpack(&mut mint_data)?;
+        let mint = PodStateWithExtensionsMut::<PodMint>::unpack(&mut mint_data)?;
 
         if source_account.base.is_frozen() {
             return Err(TokenError::AccountFrozen.into());
@@ -998,7 +1016,7 @@ impl Processor {
         if source_account.base.is_native() {
             return Err(TokenError::NativeNotSupported.into());
         }
-        if source_account.base.amount < amount {
+        if u64::from(source_account.base.amount) < amount {
             return Err(TokenError::InsufficientFunds.into());
         }
         if mint_info.key != &source_account.base.mint {
@@ -1012,21 +1030,38 @@ impl Processor {
         }
         let maybe_permanent_delegate = get_permanent_delegate(&mint);
 
+        if let Ok(cpi_guard) = source_account.get_extension::<CpiGuard>() {
+            // Blocks all cases where the authority has signed if CPI Guard is
+            // enabled, including:
+            // * the account is delegated to the owner
+            // * the account owner is the permanent delegate
+            if *authority_info.key == source_account.base.owner
+                && cpi_guard.lock_cpi.into()
+                && in_cpi()
+            {
+                return Err(TokenError::CpiGuardBurnBlocked.into());
+            }
+        }
+
         if !source_account
             .base
             .is_owned_by_system_program_or_incinerator()
         {
-            match (source_account.base.delegate, maybe_permanent_delegate) {
-                (_, Some(ref delegate)) if cmp_pubkeys(authority_info.key, delegate) => {
-                    Self::validate_owner(
-                        program_id,
-                        delegate,
-                        authority_info,
-                        authority_info_data_len,
-                        account_info_iter.as_slice(),
-                    )?
-                }
-                (COption::Some(ref delegate), _) if cmp_pubkeys(authority_info.key, delegate) => {
+            match (&source_account.base.delegate, maybe_permanent_delegate) {
+                (_, Some(ref delegate)) if authority_info.key == delegate => Self::validate_owner(
+                    program_id,
+                    delegate,
+                    authority_info,
+                    authority_info_data_len,
+                    account_info_iter.as_slice(),
+                )?,
+                (
+                    PodCOption {
+                        option: PodCOption::<Pubkey>::SOME,
+                        value: delegate,
+                    },
+                    _,
+                ) if authority_info.key == delegate => {
                     Self::validate_owner(
                         program_id,
                         delegate,
@@ -1035,16 +1070,16 @@ impl Processor {
                         account_info_iter.as_slice(),
                     )?;
 
-                    if source_account.base.delegated_amount < amount {
+                    if u64::from(source_account.base.delegated_amount) < amount {
                         return Err(TokenError::InsufficientFunds.into());
                     }
-                    source_account.base.delegated_amount = source_account
-                        .base
-                        .delegated_amount
-                        .checked_sub(amount)
-                        .ok_or(TokenError::Overflow)?;
-                    if source_account.base.delegated_amount == 0 {
-                        source_account.base.delegate = COption::None;
+                    source_account.base.delegated_amount =
+                        u64::from(source_account.base.delegated_amount)
+                            .checked_sub(amount)
+                            .ok_or(TokenError::Overflow)?
+                            .into();
+                    if u64::from(source_account.base.delegated_amount) == 0 {
+                        source_account.base.delegate = PodCOption::none();
                     }
                 }
                 _ => {
@@ -1055,12 +1090,6 @@ impl Processor {
                         authority_info_data_len,
                         account_info_iter.as_slice(),
                     )?;
-
-                    if let Ok(cpi_guard) = source_account.get_extension::<CpiGuard>() {
-                        if cpi_guard.lock_cpi.into() && in_cpi() {
-                            return Err(TokenError::CpiGuardBurnBlocked.into());
-                        }
-                    }
                 }
             }
         }
@@ -1071,19 +1100,14 @@ impl Processor {
         check_program_account(source_account_info.owner)?;
         check_program_account(mint_info.owner)?;
 
-        source_account.base.amount = source_account
-            .base
-            .amount
+        source_account.base.amount = u64::from(source_account.base.amount)
             .checked_sub(amount)
-            .ok_or(TokenError::Overflow)?;
-        mint.base.supply = mint
-            .base
-            .supply
+            .ok_or(TokenError::Overflow)?
+            .into();
+        mint.base.supply = u64::from(mint.base.supply)
             .checked_sub(amount)
-            .ok_or(TokenError::Overflow)?;
-
-        source_account.pack_base();
-        mint.pack_base();
+            .ok_or(TokenError::Overflow)?
+            .into();
 
         Ok(())
     }
@@ -1096,13 +1120,15 @@ impl Processor {
         let authority_info = next_account_info(account_info_iter)?;
         let authority_info_data_len = authority_info.data_len();
 
-        if cmp_pubkeys(source_account_info.key, destination_account_info.key) {
+        if source_account_info.key == destination_account_info.key {
             return Err(ProgramError::InvalidAccountData);
         }
 
         let source_account_data = source_account_info.data.borrow();
-        if let Ok(source_account) = StateWithExtensions::<Account>::unpack(&source_account_data) {
-            if !source_account.base.is_native() && source_account.base.amount != 0 {
+        if let Ok(source_account) =
+            PodStateWithExtensions::<PodAccount>::unpack(&source_account_data)
+        {
+            if !source_account.base.is_native() && u64::from(source_account.base.amount) != 0 {
                 return Err(TokenError::NonNativeHasBalance.into());
             }
 
@@ -1118,7 +1144,7 @@ impl Processor {
                 if let Ok(cpi_guard) = source_account.get_extension::<CpiGuard>() {
                     if cpi_guard.lock_cpi.into()
                         && in_cpi()
-                        && !cmp_pubkeys(destination_account_info.key, &source_account.base.owner)
+                        && destination_account_info.key != &source_account.base.owner
                     {
                         return Err(TokenError::CpiGuardCloseAccountBlocked.into());
                     }
@@ -1150,7 +1176,7 @@ impl Processor {
             if let Ok(transfer_fee_state) = source_account.get_extension::<TransferFeeAmount>() {
                 transfer_fee_state.closable()?
             }
-        } else if let Ok(mint) = StateWithExtensions::<Mint>::unpack(&source_account_data) {
+        } else if let Ok(mint) = PodStateWithExtensions::<PodMint>::unpack(&source_account_data) {
             let extension = mint.get_extension::<MintCloseAuthority>()?;
             let maybe_authority: Option<Pubkey> = extension.close_authority.into();
             let authority = maybe_authority.ok_or(TokenError::AuthorityTypeNotSupported)?;
@@ -1162,7 +1188,7 @@ impl Processor {
                 account_info_iter.as_slice(),
             )?;
 
-            if mint.base.supply != 0 {
+            if u64::from(mint.base.supply) != 0 {
                 return Err(TokenError::MintHasSupply.into());
             }
         } else {
@@ -1195,8 +1221,8 @@ impl Processor {
         let authority_info_data_len = authority_info.data_len();
 
         let mut source_account_data = source_account_info.data.borrow_mut();
-        let mut source_account =
-            StateWithExtensionsMut::<Account>::unpack(&mut source_account_data)?;
+        let source_account =
+            PodStateWithExtensionsMut::<PodAccount>::unpack(&mut source_account_data)?;
         if freeze && source_account.base.is_frozen() || !freeze && !source_account.base.is_frozen()
         {
             return Err(TokenError::InvalidState.into());
@@ -1204,30 +1230,31 @@ impl Processor {
         if source_account.base.is_native() {
             return Err(TokenError::NativeNotSupported.into());
         }
-        if !cmp_pubkeys(mint_info.key, &source_account.base.mint) {
+        if mint_info.key != &source_account.base.mint {
             return Err(TokenError::MintMismatch.into());
         }
 
         let mint_data = mint_info.data.borrow();
-        let mint = StateWithExtensions::<Mint>::unpack(&mint_data)?;
-        match mint.base.freeze_authority {
-            COption::Some(authority) => Self::validate_owner(
+        let mint = PodStateWithExtensions::<PodMint>::unpack(&mint_data)?;
+        match &mint.base.freeze_authority {
+            PodCOption {
+                option: PodCOption::<Pubkey>::SOME,
+                value: authority,
+            } => Self::validate_owner(
                 program_id,
-                &authority,
+                authority,
                 authority_info,
                 authority_info_data_len,
                 account_info_iter.as_slice(),
             ),
-            COption::None => Err(TokenError::MintCannotFreeze.into()),
+            _ => Err(TokenError::MintCannotFreeze.into()),
         }?;
 
         source_account.base.state = if freeze {
-            AccountState::Frozen
+            AccountState::Frozen.into()
         } else {
-            AccountState::Initialized
+            AccountState::Initialized.into()
         };
-
-        source_account.pack_base();
 
         Ok(())
     }
@@ -1239,23 +1266,26 @@ impl Processor {
 
         check_program_account(native_account_info.owner)?;
         let mut native_account_data = native_account_info.data.borrow_mut();
-        let mut native_account =
-            StateWithExtensionsMut::<Account>::unpack(&mut native_account_data)?;
+        let native_account =
+            PodStateWithExtensionsMut::<PodAccount>::unpack(&mut native_account_data)?;
 
-        if let COption::Some(rent_exempt_reserve) = native_account.base.is_native {
-            let new_amount = native_account_info
-                .lamports()
-                .checked_sub(rent_exempt_reserve)
-                .ok_or(TokenError::Overflow)?;
-            if new_amount < native_account.base.amount {
-                return Err(TokenError::InvalidState.into());
+        match native_account.base.is_native {
+            PodCOption {
+                option: PodCOption::<PodU64>::SOME,
+                value: amount,
+            } => {
+                let new_amount = native_account_info
+                    .lamports()
+                    .checked_sub(u64::from(amount))
+                    .ok_or(TokenError::Overflow)?;
+                if new_amount < u64::from(native_account.base.amount) {
+                    return Err(TokenError::InvalidState.into());
+                }
+                native_account.base.amount = new_amount.into();
             }
-            native_account.base.amount = new_amount;
-        } else {
-            return Err(TokenError::NonNativeNotSupported.into());
+            _ => return Err(TokenError::NonNativeNotSupported.into()),
         }
 
-        native_account.pack_base();
         Ok(())
     }
 
@@ -1263,13 +1293,13 @@ impl Processor {
     /// instruction
     pub fn process_initialize_mint_close_authority(
         accounts: &[AccountInfo],
-        close_authority: COption<Pubkey>,
+        close_authority: PodCOption<Pubkey>,
     ) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
         let mint_account_info = next_account_info(account_info_iter)?;
 
         let mut mint_data = mint_account_info.data.borrow_mut();
-        let mut mint = StateWithExtensionsMut::<Mint>::unpack_uninitialized(&mut mint_data)?;
+        let mut mint = PodStateWithExtensionsMut::<PodMint>::unpack_uninitialized(&mut mint_data)?;
         let extension = mint.init_extension::<MintCloseAuthority>(true)?;
         extension.close_authority = close_authority.try_into()?;
 
@@ -1279,7 +1309,7 @@ impl Processor {
     /// Processes a [GetAccountDataSize](enum.TokenInstruction.html) instruction
     pub fn process_get_account_data_size(
         accounts: &[AccountInfo],
-        new_extension_types: Vec<ExtensionType>,
+        new_extension_types: &[ExtensionType],
     ) -> ProgramResult {
         if new_extension_types
             .iter()
@@ -1294,7 +1324,7 @@ impl Processor {
         let mut account_extensions = Self::get_required_account_extensions(mint_account_info)?;
         // ExtensionType::try_calculate_account_len() dedupes types, so just a dumb
         // concatenation is fine here
-        account_extensions.extend_from_slice(&new_extension_types);
+        account_extensions.extend_from_slice(new_extension_types);
 
         let account_len = ExtensionType::try_calculate_account_len::<Account>(&account_extensions)?;
         set_return_data(&account_len.to_le_bytes());
@@ -1309,7 +1339,7 @@ impl Processor {
         let token_account_info = next_account_info(account_info_iter)?;
         let token_account_data = &mut token_account_info.data.borrow_mut();
         let mut token_account =
-            StateWithExtensionsMut::<Account>::unpack_uninitialized(token_account_data)?;
+            PodStateWithExtensionsMut::<PodAccount>::unpack_uninitialized(token_account_data)?;
         token_account
             .init_extension::<ImmutableOwner>(true)
             .map(|_| ())
@@ -1322,7 +1352,7 @@ impl Processor {
         check_program_account(mint_info.owner)?;
 
         let mint_data = mint_info.data.borrow();
-        let mint = StateWithExtensions::<Mint>::unpack(&mint_data)
+        let mint = PodStateWithExtensions::<PodMint>::unpack(&mint_data)
             .map_err(|_| Into::<ProgramError>::into(TokenError::InvalidMint))?;
         let ui_amount = if let Ok(extension) = mint.get_extension::<InterestBearingConfig>() {
             let unix_timestamp = Clock::get()?.unix_timestamp;
@@ -1344,7 +1374,7 @@ impl Processor {
         check_program_account(mint_info.owner)?;
 
         let mint_data = mint_info.data.borrow();
-        let mint = StateWithExtensions::<Mint>::unpack(&mint_data)
+        let mint = PodStateWithExtensions::<PodMint>::unpack(&mint_data)
             .map_err(|_| Into::<ProgramError>::into(TokenError::InvalidMint))?;
         let amount = if let Ok(extension) = mint.get_extension::<InterestBearingConfig>() {
             let unix_timestamp = Clock::get()?.unix_timestamp;
@@ -1409,7 +1439,7 @@ impl Processor {
         let mint_account_info = next_account_info(account_info_iter)?;
 
         let mut mint_data = mint_account_info.data.borrow_mut();
-        let mut mint = StateWithExtensionsMut::<Mint>::unpack_uninitialized(&mut mint_data)?;
+        let mut mint = PodStateWithExtensionsMut::<PodMint>::unpack_uninitialized(&mut mint_data)?;
         mint.init_extension::<NonTransferable>(true)?;
 
         Ok(())
@@ -1419,20 +1449,20 @@ impl Processor {
     /// instruction
     pub fn process_initialize_permanent_delegate(
         accounts: &[AccountInfo],
-        delegate: Pubkey,
+        delegate: &Pubkey,
     ) -> ProgramResult {
         let account_info_iter = &mut accounts.iter();
         let mint_account_info = next_account_info(account_info_iter)?;
 
         let mut mint_data = mint_account_info.data.borrow_mut();
-        let mut mint = StateWithExtensionsMut::<Mint>::unpack_uninitialized(&mut mint_data)?;
+        let mut mint = PodStateWithExtensionsMut::<PodMint>::unpack_uninitialized(&mut mint_data)?;
         let extension = mint.init_extension::<PermanentDelegate>(true)?;
-        extension.delegate = Some(delegate).try_into()?;
+        extension.delegate = Some(*delegate).try_into()?;
 
         Ok(())
     }
 
-    /// Withdraw Excess Lamports is used to recover Lamports transfered to any
+    /// Withdraw Excess Lamports is used to recover Lamports transferred to any
     /// TokenProgram owned account by moving them to another account
     /// of the source account.
     pub fn process_withdraw_excess_lamports(
@@ -1447,7 +1477,7 @@ impl Processor {
 
         let source_data = source_info.data.borrow();
 
-        if let Ok(account) = StateWithExtensions::<Account>::unpack(&source_data) {
+        if let Ok(account) = PodStateWithExtensions::<PodAccount>::unpack(&source_data) {
             if account.base.is_native() {
                 return Err(TokenError::NativeNotSupported.into());
             }
@@ -1458,19 +1488,23 @@ impl Processor {
                 authority_info.data_len(),
                 account_info_iter.as_slice(),
             )?;
-        } else if let Ok(mint) = StateWithExtensions::<Mint>::unpack(&source_data) {
-            if let COption::Some(mint_authority) = mint.base.mint_authority {
-                Self::validate_owner(
-                    program_id,
-                    &mint_authority,
-                    authority_info,
-                    authority_info.data_len(),
-                    account_info_iter.as_slice(),
-                )?;
-            } else {
-                return Err(TokenError::AuthorityTypeNotSupported.into());
+        } else if let Ok(mint) = PodStateWithExtensions::<PodMint>::unpack(&source_data) {
+            match &mint.base.mint_authority {
+                PodCOption {
+                    option: PodCOption::<Pubkey>::SOME,
+                    value: mint_authority,
+                } => {
+                    Self::validate_owner(
+                        program_id,
+                        mint_authority,
+                        authority_info,
+                        authority_info.data_len(),
+                        account_info_iter.as_slice(),
+                    )?;
+                }
+                _ => return Err(TokenError::AuthorityTypeNotSupported.into()),
             }
-        } else if source_data.len() == Multisig::LEN {
+        } else if source_data.len() == PodMultisig::SIZE_OF {
             Self::validate_owner(
                 program_id,
                 source_info.key,
@@ -1504,205 +1538,252 @@ impl Processor {
 
     /// Processes an [Instruction](enum.Instruction.html).
     pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], input: &[u8]) -> ProgramResult {
-        if let Ok(instruction) = TokenInstruction::unpack(input) {
-            match instruction {
-                TokenInstruction::InitializeMint {
-                    decimals,
-                    mint_authority,
-                    freeze_authority,
-                } => {
+        if let Ok(instruction_type) = decode_instruction_type(input) {
+            match instruction_type {
+                PodTokenInstruction::InitializeMint => {
                     msg!("Instruction: InitializeMint");
+                    let (data, freeze_authority) =
+                        decode_instruction_data_with_coption_pubkey::<InitializeMintData>(input)?;
                     Self::process_initialize_mint(
                         accounts,
-                        decimals,
-                        mint_authority,
+                        data.decimals,
+                        &data.mint_authority,
                         freeze_authority,
                     )
                 }
-                TokenInstruction::InitializeMint2 {
-                    decimals,
-                    mint_authority,
-                    freeze_authority,
-                } => {
+                PodTokenInstruction::InitializeMint2 => {
                     msg!("Instruction: InitializeMint2");
+                    let (data, freeze_authority) =
+                        decode_instruction_data_with_coption_pubkey::<InitializeMintData>(input)?;
                     Self::process_initialize_mint2(
                         accounts,
-                        decimals,
-                        mint_authority,
+                        data.decimals,
+                        &data.mint_authority,
                         freeze_authority,
                     )
                 }
-                TokenInstruction::InitializeAccount => {
+                PodTokenInstruction::InitializeAccount => {
                     msg!("Instruction: InitializeAccount");
                     Self::process_initialize_account(accounts)
                 }
-                TokenInstruction::InitializeAccount2 { owner } => {
+                PodTokenInstruction::InitializeAccount2 => {
                     msg!("Instruction: InitializeAccount2");
+                    let owner = decode_instruction_data::<Pubkey>(input)?;
                     Self::process_initialize_account2(accounts, owner)
                 }
-                TokenInstruction::InitializeAccount3 { owner } => {
+                PodTokenInstruction::InitializeAccount3 => {
                     msg!("Instruction: InitializeAccount3");
+                    let owner = decode_instruction_data::<Pubkey>(input)?;
                     Self::process_initialize_account3(accounts, owner)
                 }
-                TokenInstruction::InitializeMultisig { m } => {
+                PodTokenInstruction::InitializeMultisig => {
                     msg!("Instruction: InitializeMultisig");
-                    Self::process_initialize_multisig(accounts, m)
+                    let data = decode_instruction_data::<InitializeMultisigData>(input)?;
+                    Self::process_initialize_multisig(accounts, data.m)
                 }
-                TokenInstruction::InitializeMultisig2 { m } => {
+                PodTokenInstruction::InitializeMultisig2 => {
                     msg!("Instruction: InitializeMultisig2");
-                    Self::process_initialize_multisig2(accounts, m)
+                    let data = decode_instruction_data::<InitializeMultisigData>(input)?;
+                    Self::process_initialize_multisig2(accounts, data.m)
                 }
                 #[allow(deprecated)]
-                TokenInstruction::Transfer { amount } => {
+                PodTokenInstruction::Transfer => {
                     msg!("Instruction: Transfer");
-                    Self::process_transfer(program_id, accounts, amount, None, None)
+                    let data = decode_instruction_data::<AmountData>(input)?;
+                    Self::process_transfer(program_id, accounts, data.amount.into(), None, None)
                 }
-                TokenInstruction::Approve { amount } => {
+                PodTokenInstruction::Approve => {
                     msg!("Instruction: Approve");
-                    Self::process_approve(program_id, accounts, amount, None)
+                    let data = decode_instruction_data::<AmountData>(input)?;
+                    Self::process_approve(program_id, accounts, data.amount.into(), None)
                 }
-                TokenInstruction::Revoke => {
+                PodTokenInstruction::Revoke => {
                     msg!("Instruction: Revoke");
                     Self::process_revoke(program_id, accounts)
                 }
-                TokenInstruction::SetAuthority {
-                    authority_type,
-                    new_authority,
-                } => {
+                PodTokenInstruction::SetAuthority => {
                     msg!("Instruction: SetAuthority");
-                    Self::process_set_authority(program_id, accounts, authority_type, new_authority)
+                    let (data, new_authority) =
+                        decode_instruction_data_with_coption_pubkey::<SetAuthorityData>(input)?;
+                    Self::process_set_authority(
+                        program_id,
+                        accounts,
+                        AuthorityType::from(data.authority_type)?,
+                        new_authority,
+                    )
                 }
-                TokenInstruction::MintTo { amount } => {
+                PodTokenInstruction::MintTo => {
                     msg!("Instruction: MintTo");
-                    Self::process_mint_to(program_id, accounts, amount, None)
+                    let data = decode_instruction_data::<AmountData>(input)?;
+                    Self::process_mint_to(program_id, accounts, data.amount.into(), None)
                 }
-                TokenInstruction::Burn { amount } => {
+                PodTokenInstruction::Burn => {
                     msg!("Instruction: Burn");
-                    Self::process_burn(program_id, accounts, amount, None)
+                    let data = decode_instruction_data::<AmountData>(input)?;
+                    Self::process_burn(program_id, accounts, data.amount.into(), None)
                 }
-                TokenInstruction::CloseAccount => {
+                PodTokenInstruction::CloseAccount => {
                     msg!("Instruction: CloseAccount");
                     Self::process_close_account(program_id, accounts)
                 }
-                TokenInstruction::FreezeAccount => {
+                PodTokenInstruction::FreezeAccount => {
                     msg!("Instruction: FreezeAccount");
                     Self::process_toggle_freeze_account(program_id, accounts, true)
                 }
-                TokenInstruction::ThawAccount => {
+                PodTokenInstruction::ThawAccount => {
                     msg!("Instruction: ThawAccount");
                     Self::process_toggle_freeze_account(program_id, accounts, false)
                 }
-                TokenInstruction::TransferChecked { amount, decimals } => {
+                PodTokenInstruction::TransferChecked => {
                     msg!("Instruction: TransferChecked");
-                    Self::process_transfer(program_id, accounts, amount, Some(decimals), None)
+                    let data = decode_instruction_data::<AmountCheckedData>(input)?;
+                    Self::process_transfer(
+                        program_id,
+                        accounts,
+                        data.amount.into(),
+                        Some(data.decimals),
+                        None,
+                    )
                 }
-                TokenInstruction::ApproveChecked { amount, decimals } => {
+                PodTokenInstruction::ApproveChecked => {
                     msg!("Instruction: ApproveChecked");
-                    Self::process_approve(program_id, accounts, amount, Some(decimals))
+                    let data = decode_instruction_data::<AmountCheckedData>(input)?;
+                    Self::process_approve(
+                        program_id,
+                        accounts,
+                        data.amount.into(),
+                        Some(data.decimals),
+                    )
                 }
-                TokenInstruction::MintToChecked { amount, decimals } => {
+                PodTokenInstruction::MintToChecked => {
                     msg!("Instruction: MintToChecked");
-                    Self::process_mint_to(program_id, accounts, amount, Some(decimals))
+                    let data = decode_instruction_data::<AmountCheckedData>(input)?;
+                    Self::process_mint_to(
+                        program_id,
+                        accounts,
+                        data.amount.into(),
+                        Some(data.decimals),
+                    )
                 }
-                TokenInstruction::BurnChecked { amount, decimals } => {
+                PodTokenInstruction::BurnChecked => {
                     msg!("Instruction: BurnChecked");
-                    Self::process_burn(program_id, accounts, amount, Some(decimals))
+                    let data = decode_instruction_data::<AmountCheckedData>(input)?;
+                    Self::process_burn(
+                        program_id,
+                        accounts,
+                        data.amount.into(),
+                        Some(data.decimals),
+                    )
                 }
-                TokenInstruction::SyncNative => {
+                PodTokenInstruction::SyncNative => {
                     msg!("Instruction: SyncNative");
                     Self::process_sync_native(accounts)
                 }
-                TokenInstruction::GetAccountDataSize { extension_types } => {
+                PodTokenInstruction::GetAccountDataSize => {
                     msg!("Instruction: GetAccountDataSize");
-                    Self::process_get_account_data_size(accounts, extension_types)
+                    let extension_types = input[1..]
+                        .chunks(std::mem::size_of::<ExtensionType>())
+                        .map(ExtensionType::try_from)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Self::process_get_account_data_size(accounts, &extension_types)
                 }
-                TokenInstruction::InitializeMintCloseAuthority { close_authority } => {
+                PodTokenInstruction::InitializeMintCloseAuthority => {
                     msg!("Instruction: InitializeMintCloseAuthority");
+                    let (_, close_authority) =
+                        decode_instruction_data_with_coption_pubkey::<()>(input)?;
                     Self::process_initialize_mint_close_authority(accounts, close_authority)
                 }
-                TokenInstruction::TransferFeeExtension(instruction) => {
-                    transfer_fee::processor::process_instruction(program_id, accounts, instruction)
+                PodTokenInstruction::TransferFeeExtension => {
+                    transfer_fee::processor::process_instruction(program_id, accounts, &input[1..])
                 }
-                TokenInstruction::ConfidentialTransferExtension => {
+                PodTokenInstruction::ConfidentialTransferExtension => {
                     confidential_transfer::processor::process_instruction(
                         program_id,
                         accounts,
                         &input[1..],
                     )
                 }
-                TokenInstruction::DefaultAccountStateExtension => {
+                PodTokenInstruction::DefaultAccountStateExtension => {
                     default_account_state::processor::process_instruction(
                         program_id,
                         accounts,
                         &input[1..],
                     )
                 }
-                TokenInstruction::InitializeImmutableOwner => {
+                PodTokenInstruction::InitializeImmutableOwner => {
                     msg!("Instruction: InitializeImmutableOwner");
                     Self::process_initialize_immutable_owner(accounts)
                 }
-                TokenInstruction::AmountToUiAmount { amount } => {
+                PodTokenInstruction::AmountToUiAmount => {
                     msg!("Instruction: AmountToUiAmount");
-                    Self::process_amount_to_ui_amount(accounts, amount)
+                    let data = decode_instruction_data::<AmountData>(input)?;
+                    Self::process_amount_to_ui_amount(accounts, data.amount.into())
                 }
-                TokenInstruction::UiAmountToAmount { ui_amount } => {
+                PodTokenInstruction::UiAmountToAmount => {
                     msg!("Instruction: UiAmountToAmount");
+                    let ui_amount = std::str::from_utf8(&input[1..])
+                        .map_err(|_| TokenError::InvalidInstruction)?;
                     Self::process_ui_amount_to_amount(accounts, ui_amount)
                 }
-                TokenInstruction::Reallocate { extension_types } => {
+                PodTokenInstruction::Reallocate => {
                     msg!("Instruction: Reallocate");
+                    let extension_types = input[1..]
+                        .chunks(std::mem::size_of::<ExtensionType>())
+                        .map(ExtensionType::try_from)
+                        .collect::<Result<Vec<_>, _>>()?;
                     reallocate::process_reallocate(program_id, accounts, extension_types)
                 }
-                TokenInstruction::MemoTransferExtension => {
+                PodTokenInstruction::MemoTransferExtension => {
                     memo_transfer::processor::process_instruction(program_id, accounts, &input[1..])
                 }
-                TokenInstruction::CreateNativeMint => {
+                PodTokenInstruction::CreateNativeMint => {
                     msg!("Instruction: CreateNativeMint");
                     Self::process_create_native_mint(accounts)
                 }
-                TokenInstruction::InitializeNonTransferableMint => {
+                PodTokenInstruction::InitializeNonTransferableMint => {
                     msg!("Instruction: InitializeNonTransferableMint");
                     Self::process_initialize_non_transferable_mint(accounts)
                 }
-                TokenInstruction::InterestBearingMintExtension => {
+                PodTokenInstruction::InterestBearingMintExtension => {
                     interest_bearing_mint::processor::process_instruction(
                         program_id,
                         accounts,
                         &input[1..],
                     )
                 }
-                TokenInstruction::CpiGuardExtension => {
+                PodTokenInstruction::CpiGuardExtension => {
                     cpi_guard::processor::process_instruction(program_id, accounts, &input[1..])
                 }
-                TokenInstruction::InitializePermanentDelegate { delegate } => {
+                PodTokenInstruction::InitializePermanentDelegate => {
                     msg!("Instruction: InitializePermanentDelegate");
+                    let delegate = decode_instruction_data::<Pubkey>(input)?;
                     Self::process_initialize_permanent_delegate(accounts, delegate)
                 }
-                TokenInstruction::TransferHookExtension => {
+                PodTokenInstruction::TransferHookExtension => {
                     transfer_hook::processor::process_instruction(program_id, accounts, &input[1..])
                 }
-                TokenInstruction::ConfidentialTransferFeeExtension => {
+                PodTokenInstruction::ConfidentialTransferFeeExtension => {
                     confidential_transfer_fee::processor::process_instruction(
                         program_id,
                         accounts,
                         &input[1..],
                     )
                 }
-                TokenInstruction::WithdrawExcessLamports => {
+                PodTokenInstruction::WithdrawExcessLamports => {
                     msg!("Instruction: WithdrawExcessLamports");
                     Self::process_withdraw_excess_lamports(program_id, accounts)
                 }
-                TokenInstruction::MetadataPointerExtension => {
+                PodTokenInstruction::MetadataPointerExtension => {
                     metadata_pointer::processor::process_instruction(
                         program_id,
                         accounts,
                         &input[1..],
                     )
                 }
-                TokenInstruction::GroupPointerExtension => {
+                PodTokenInstruction::GroupPointerExtension => {
                     group_pointer::processor::process_instruction(program_id, accounts, &input[1..])
                 }
-                TokenInstruction::GroupMemberPointerExtension => {
+                PodTokenInstruction::GroupMemberPointerExtension => {
                     group_member_pointer::processor::process_instruction(
                         program_id,
                         accounts,
@@ -1727,19 +1808,19 @@ impl Processor {
         owner_account_data_len: usize,
         signers: &[AccountInfo],
     ) -> ProgramResult {
-        if !cmp_pubkeys(expected_owner, owner_account_info.key) {
+        if expected_owner != owner_account_info.key {
             return Err(TokenError::OwnerMismatch.into());
         }
 
-        if cmp_pubkeys(program_id, owner_account_info.owner)
-            && owner_account_data_len == Multisig::get_packed_len()
+        if program_id == owner_account_info.owner && owner_account_data_len == PodMultisig::SIZE_OF
         {
-            let multisig = Multisig::unpack(&owner_account_info.data.borrow())?;
+            let multisig_data = &owner_account_info.data.borrow();
+            let multisig = pod_from_bytes::<PodMultisig>(multisig_data)?;
             let mut num_signers = 0;
             let mut matched = [false; MAX_SIGNERS];
             for signer in signers.iter() {
                 for (position, key) in multisig.signers[0..multisig.n as usize].iter().enumerate() {
-                    if cmp_pubkeys(key, signer.key) && !matched[position] {
+                    if key == signer.key && !matched[position] {
                         if !signer.is_signer {
                             return Err(ProgramError::MissingRequiredSignature);
                         }
@@ -1762,17 +1843,17 @@ impl Processor {
         mint_account_info: &AccountInfo,
     ) -> Result<Vec<ExtensionType>, ProgramError> {
         let mint_data = mint_account_info.data.borrow();
-        let state = StateWithExtensions::<Mint>::unpack(&mint_data)
+        let state = PodStateWithExtensions::<PodMint>::unpack(&mint_data)
             .map_err(|_| Into::<ProgramError>::into(TokenError::InvalidMint))?;
         Self::get_required_account_extensions_from_unpacked_mint(mint_account_info.owner, &state)
     }
 
     fn get_required_account_extensions_from_unpacked_mint(
         token_program_id: &Pubkey,
-        state: &StateWithExtensions<Mint>,
+        state: &PodStateWithExtensions<PodMint>,
     ) -> Result<Vec<ExtensionType>, ProgramError> {
         check_program_account(token_program_id)?;
-        let mint_extensions: Vec<ExtensionType> = state.get_extension_types()?;
+        let mint_extensions = state.get_extension_types()?;
         Ok(ExtensionType::get_required_init_account_extensions(
             &mint_extensions,
         ))
@@ -1804,6 +1885,7 @@ mod tests {
         super::*,
         crate::{
             extension::transfer_fee::instruction::initialize_transfer_fee_config, instruction::*,
+            state::Multisig,
         },
         serial_test::serial,
         solana_program::{
@@ -1811,6 +1893,7 @@ mod tests {
             clock::Epoch,
             instruction::Instruction,
             program_error::{self, PrintProgramError},
+            program_option::COption,
             sysvar::{clock::Clock, rent},
         },
         solana_sdk::account::{
@@ -7307,6 +7390,91 @@ mod tests {
         .unwrap();
 
         assert_eq!(account_account, account3_account);
+    }
+
+    #[test]
+    fn initialize_account_on_non_transferable_mint() {
+        let program_id = crate::id();
+        let account = Pubkey::new_unique();
+        let account_len = ExtensionType::try_calculate_account_len::<Mint>(&[
+            ExtensionType::NonTransferableAccount,
+        ])
+        .unwrap();
+        let mut account_without_enough_length = SolanaAccount::new(
+            Rent::default().minimum_balance(account_len),
+            account_len,
+            &program_id,
+        );
+
+        let account2 = Pubkey::new_unique();
+        let account2_len = ExtensionType::try_calculate_account_len::<Mint>(&[
+            ExtensionType::NonTransferableAccount,
+            ExtensionType::ImmutableOwner,
+        ])
+        .unwrap();
+        let mut account_with_enough_length = SolanaAccount::new(
+            Rent::default().minimum_balance(account2_len),
+            account2_len,
+            &program_id,
+        );
+
+        let owner_key = Pubkey::new_unique();
+        let mut owner_account = SolanaAccount::default();
+        let mint_key = Pubkey::new_unique();
+        let mint_len =
+            ExtensionType::try_calculate_account_len::<Mint>(&[ExtensionType::NonTransferable])
+                .unwrap();
+        let mut mint_account = SolanaAccount::new(
+            Rent::default().minimum_balance(mint_len),
+            mint_len,
+            &program_id,
+        );
+        let mut rent_sysvar = rent_sysvar();
+
+        // create a non-transferable mint
+        assert_eq!(
+            Ok(()),
+            do_process_instruction(
+                initialize_non_transferable_mint(&program_id, &mint_key).unwrap(),
+                vec![&mut mint_account],
+            )
+        );
+        assert_eq!(
+            Ok(()),
+            do_process_instruction(
+                initialize_mint(&program_id, &mint_key, &owner_key, None, 2).unwrap(),
+                vec![&mut mint_account, &mut rent_sysvar]
+            )
+        );
+
+        //fail when account space is not enough for adding the immutable ownership
+        // extension
+        assert_eq!(
+            Err(ProgramError::InvalidAccountData),
+            do_process_instruction(
+                initialize_account(&program_id, &account, &mint_key, &owner_key).unwrap(),
+                vec![
+                    &mut account_without_enough_length,
+                    &mut mint_account,
+                    &mut owner_account,
+                    &mut rent_sysvar,
+                ]
+            )
+        );
+
+        //success to initialize an account with enough data space
+        assert_eq!(
+            Ok(()),
+            do_process_instruction(
+                initialize_account(&program_id, &account2, &mint_key, &owner_key).unwrap(),
+                vec![
+                    &mut account_with_enough_length,
+                    &mut mint_account,
+                    &mut owner_account,
+                    &mut rent_sysvar,
+                ]
+            )
+        );
     }
 
     #[test]

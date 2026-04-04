@@ -14,10 +14,10 @@ import * as web3 from '@solana/web3.js';
  * @category generated
  */
 export type ReplaceLeafInstructionArgs = {
-    root: number[] /* size: 32 */;
-    previousLeaf: number[] /* size: 32 */;
-    newLeaf: number[] /* size: 32 */;
     index: number;
+    newLeaf: number[] /* size: 32 */;
+    previousLeaf: number[] /* size: 32 */;
+    root: number[] /* size: 32 */;
 };
 /**
  * @category Instructions
@@ -36,7 +36,7 @@ export const replaceLeafStruct = new beet.BeetArgsStruct<
         ['newLeaf', beet.uniformFixedSizeArray(beet.u8, 32)],
         ['index', beet.u32],
     ],
-    'ReplaceLeafInstructionArgs'
+    'ReplaceLeafInstructionArgs',
 );
 /**
  * Accounts required by the _replaceLeaf_ instruction
@@ -49,10 +49,10 @@ export const replaceLeafStruct = new beet.BeetArgsStruct<
  * @category generated
  */
 export type ReplaceLeafInstructionAccounts = {
-    merkleTree: web3.PublicKey;
-    authority: web3.PublicKey;
-    noop: web3.PublicKey;
     anchorRemainingAccounts?: web3.AccountMeta[];
+    authority: web3.PublicKey;
+    merkleTree: web3.PublicKey;
+    noop: web3.PublicKey;
 };
 
 export const replaceLeafInstructionDiscriminator = [204, 165, 76, 100, 73, 147, 0, 128];
@@ -70,7 +70,7 @@ export const replaceLeafInstructionDiscriminator = [204, 165, 76, 100, 73, 147, 
 export function createReplaceLeafInstruction(
     accounts: ReplaceLeafInstructionAccounts,
     args: ReplaceLeafInstructionArgs,
-    programId = new web3.PublicKey('cmtDvXumGCrqC1Age74AVPhSRVXJMd8PJS91L8KbNCK')
+    programId = new web3.PublicKey('cmtDvXumGCrqC1Age74AVPhSRVXJMd8PJS91L8KbNCK'),
 ) {
     const [data] = replaceLeafStruct.serialize({
         instructionDiscriminator: replaceLeafInstructionDiscriminator,

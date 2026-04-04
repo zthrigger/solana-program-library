@@ -1,9 +1,9 @@
 #![allow(dead_code)]
 
 use {
-    borsh::{BorshDeserialize, BorshSerialize},
+    borsh::BorshDeserialize,
     solana_program::{
-        borsh0_10::{get_instance_packed_len, get_packed_len, try_from_slice_unchecked},
+        borsh1::{get_instance_packed_len, get_packed_len, try_from_slice_unchecked},
         hash::Hash,
         instruction::Instruction,
         program_option::COption,
@@ -32,7 +32,7 @@ use {
         instruction, minimum_delegation,
         processor::Processor,
         state::{self, FeeType, FutureEpoch, StakePool, ValidatorList},
-        MINIMUM_RESERVE_LAMPORTS,
+        MAX_VALIDATORS_TO_UPDATE, MINIMUM_RESERVE_LAMPORTS,
     },
     spl_token_2022::{
         extension::{ExtensionType, StateWithExtensionsOwned},
@@ -626,7 +626,7 @@ pub async fn create_vote(
         },
         rent_voter,
         vote_instruction::CreateVoteAccountConfig {
-            space: VoteStateVersions::vote_state_size_of(true) as u64,
+            space: VoteState::size_of() as u64,
             ..Default::default()
         },
     ));
@@ -897,15 +897,17 @@ impl StakePoolAccounts {
     }
 
     pub fn calculate_fee(&self, amount: u64) -> u64 {
-        amount * self.epoch_fee.numerator / self.epoch_fee.denominator
+        (amount * self.epoch_fee.numerator + self.epoch_fee.denominator - 1)
+            / self.epoch_fee.denominator
     }
 
     pub fn calculate_withdrawal_fee(&self, pool_tokens: u64) -> u64 {
-        pool_tokens * self.withdrawal_fee.numerator / self.withdrawal_fee.denominator
+        (pool_tokens * self.withdrawal_fee.numerator + self.withdrawal_fee.denominator - 1)
+            / self.withdrawal_fee.denominator
     }
 
     pub fn calculate_inverse_withdrawal_fee(&self, pool_tokens: u64) -> u64 {
-        pool_tokens * self.withdrawal_fee.denominator
+        (pool_tokens * self.withdrawal_fee.denominator + self.withdrawal_fee.denominator - 1)
             / (self.withdrawal_fee.denominator - self.withdrawal_fee.numerator)
     }
 
@@ -914,7 +916,8 @@ impl StakePoolAccounts {
     }
 
     pub fn calculate_sol_deposit_fee(&self, pool_tokens: u64) -> u64 {
-        pool_tokens * self.sol_deposit_fee.numerator / self.sol_deposit_fee.denominator
+        (pool_tokens * self.sol_deposit_fee.numerator + self.sol_deposit_fee.denominator - 1)
+            / self.sol_deposit_fee.denominator
     }
 
     pub fn calculate_sol_referral_fee(&self, deposit_fee_collected: u64) -> u64 {
@@ -1412,21 +1415,22 @@ impl StakePoolAccounts {
         banks_client: &mut BanksClient,
         payer: &Keypair,
         recent_blockhash: &Hash,
-        validator_vote_accounts: &[Pubkey],
+        len: usize,
         no_merge: bool,
     ) -> Option<TransportError> {
         let validator_list = self.get_validator_list(banks_client).await;
-        let mut instructions = vec![instruction::update_validator_list_balance(
+        let mut instructions = vec![instruction::update_validator_list_balance_chunk(
             &id(),
             &self.stake_pool.pubkey(),
             &self.withdraw_authority,
             &self.validator_list.pubkey(),
             &self.reserve_stake.pubkey(),
             &validator_list,
-            validator_vote_accounts,
+            len,
             0,
             no_merge,
-        )];
+        )
+        .unwrap()];
         self.maybe_add_compute_budget_instruction(&mut instructions);
         let transaction = Transaction::new_signed_with_payer(
             &instructions,
@@ -1501,22 +1505,31 @@ impl StakePoolAccounts {
         banks_client: &mut BanksClient,
         payer: &Keypair,
         recent_blockhash: &Hash,
-        validator_vote_accounts: &[Pubkey],
         no_merge: bool,
     ) -> Option<TransportError> {
         let validator_list = self.get_validator_list(banks_client).await;
-        let mut instructions = vec![
-            instruction::update_validator_list_balance(
-                &id(),
-                &self.stake_pool.pubkey(),
-                &self.withdraw_authority,
-                &self.validator_list.pubkey(),
-                &self.reserve_stake.pubkey(),
-                &validator_list,
-                validator_vote_accounts,
-                0,
-                no_merge,
-            ),
+        let mut instructions = vec![];
+        for (i, chunk) in validator_list
+            .validators
+            .chunks(MAX_VALIDATORS_TO_UPDATE)
+            .enumerate()
+        {
+            instructions.push(
+                instruction::update_validator_list_balance_chunk(
+                    &id(),
+                    &self.stake_pool.pubkey(),
+                    &self.withdraw_authority,
+                    &self.validator_list.pubkey(),
+                    &self.reserve_stake.pubkey(),
+                    &validator_list,
+                    chunk.len(),
+                    i * MAX_VALIDATORS_TO_UPDATE,
+                    no_merge,
+                )
+                .unwrap(),
+            );
+        }
+        instructions.extend([
             instruction::update_stake_pool_balance(
                 &id(),
                 &self.stake_pool.pubkey(),
@@ -1532,7 +1545,7 @@ impl StakePoolAccounts {
                 &self.stake_pool.pubkey(),
                 &self.validator_list.pubkey(),
             ),
-        ];
+        ]);
         self.maybe_add_compute_budget_instruction(&mut instructions);
         let transaction = Transaction::new_signed_with_payer(
             &instructions,
@@ -2526,7 +2539,7 @@ pub fn add_stake_pool_account(
     stake_pool_pubkey: &Pubkey,
     stake_pool: &state::StakePool,
 ) {
-    let mut stake_pool_bytes = stake_pool.try_to_vec().unwrap();
+    let mut stake_pool_bytes = borsh::to_vec(&stake_pool).unwrap();
     // more room for optionals
     stake_pool_bytes.extend_from_slice(Pubkey::default().as_ref());
     stake_pool_bytes.extend_from_slice(Pubkey::default().as_ref());
@@ -2546,11 +2559,11 @@ pub fn add_validator_list_account(
     validator_list: &state::ValidatorList,
     max_validators: u32,
 ) {
-    let mut validator_list_bytes = validator_list.try_to_vec().unwrap();
+    let mut validator_list_bytes = borsh::to_vec(&validator_list).unwrap();
     // add extra room if needed
     for _ in validator_list.validators.len()..max_validators as usize {
         validator_list_bytes
-            .append(&mut state::ValidatorStakeInfo::default().try_to_vec().unwrap());
+            .append(&mut borsh::to_vec(&state::ValidatorStakeInfo::default()).unwrap());
     }
     let validator_list_account = SolanaAccount::create(
         ACCOUNT_RENT_EXEMPTION,

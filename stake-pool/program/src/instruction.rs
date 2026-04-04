@@ -8,14 +8,17 @@ use {
         find_stake_program_address, find_transient_stake_program_address,
         find_withdraw_authority_program_address,
         inline_mpl_token_metadata::{self, pda::find_metadata_account},
-        state::{Fee, FeeType, StakePool, ValidatorList},
+        state::{Fee, FeeType, StakePool, ValidatorList, ValidatorStakeInfo},
         MAX_VALIDATORS_TO_UPDATE,
     },
     borsh::{BorshDeserialize, BorshSchema, BorshSerialize},
     solana_program::{
         instruction::{AccountMeta, Instruction},
+        program_error::ProgramError,
         pubkey::Pubkey,
-        stake, system_program, sysvar,
+        stake,
+        stake_history::Epoch,
+        system_program, sysvar,
     },
     std::num::NonZeroU32,
 };
@@ -747,7 +750,7 @@ pub fn initialize(
         referral_fee,
         max_validators,
     };
-    let data = init_data.try_to_vec().unwrap();
+    let data = borsh::to_vec(&init_data).unwrap();
     let mut accounts = vec![
         AccountMeta::new(*stake_pool, false),
         AccountMeta::new_readonly(*manager, true),
@@ -798,9 +801,10 @@ pub fn add_validator_to_pool(
         AccountMeta::new_readonly(system_program::id(), false),
         AccountMeta::new_readonly(stake::program::id(), false),
     ];
-    let data = StakePoolInstruction::AddValidatorToPool(seed.map(|s| s.get()).unwrap_or(0))
-        .try_to_vec()
-        .unwrap();
+    let data = borsh::to_vec(&StakePoolInstruction::AddValidatorToPool(
+        seed.map(|s| s.get()).unwrap_or(0),
+    ))
+    .unwrap();
     Instruction {
         program_id: *program_id,
         accounts,
@@ -832,9 +836,7 @@ pub fn remove_validator_from_pool(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::RemoveValidatorFromPool
-            .try_to_vec()
-            .unwrap(),
+        data: borsh::to_vec(&StakePoolInstruction::RemoveValidatorFromPool).unwrap(),
     }
 }
 
@@ -870,11 +872,10 @@ pub fn decrease_validator_stake(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::DecreaseValidatorStake {
+        data: borsh::to_vec(&StakePoolInstruction::DecreaseValidatorStake {
             lamports,
             transient_stake_seed,
-        }
-        .try_to_vec()
+        })
         .unwrap(),
     }
 }
@@ -912,12 +913,11 @@ pub fn decrease_additional_validator_stake(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::DecreaseAdditionalValidatorStake {
+        data: borsh::to_vec(&StakePoolInstruction::DecreaseAdditionalValidatorStake {
             lamports,
             transient_stake_seed,
             ephemeral_stake_seed,
-        }
-        .try_to_vec()
+        })
         .unwrap(),
     }
 }
@@ -952,11 +952,10 @@ pub fn decrease_validator_stake_with_reserve(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::DecreaseValidatorStakeWithReserve {
+        data: borsh::to_vec(&StakePoolInstruction::DecreaseValidatorStakeWithReserve {
             lamports,
             transient_stake_seed,
-        }
-        .try_to_vec()
+        })
         .unwrap(),
     }
 }
@@ -996,11 +995,10 @@ pub fn increase_validator_stake(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::IncreaseValidatorStake {
+        data: borsh::to_vec(&StakePoolInstruction::IncreaseValidatorStake {
             lamports,
             transient_stake_seed,
-        }
-        .try_to_vec()
+        })
         .unwrap(),
     }
 }
@@ -1042,12 +1040,11 @@ pub fn increase_additional_validator_stake(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::IncreaseAdditionalValidatorStake {
+        data: borsh::to_vec(&StakePoolInstruction::IncreaseAdditionalValidatorStake {
             lamports,
             transient_stake_seed,
             ephemeral_stake_seed,
-        }
-        .try_to_vec()
+        })
         .unwrap(),
     }
 }
@@ -1094,13 +1091,12 @@ pub fn redelegate(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::Redelegate {
+        data: borsh::to_vec(&StakePoolInstruction::Redelegate {
             lamports,
             source_transient_stake_seed,
             ephemeral_stake_seed,
             destination_transient_stake_seed,
-        }
-        .try_to_vec()
+        })
         .unwrap(),
     }
 }
@@ -1121,11 +1117,10 @@ pub fn set_preferred_validator(
             AccountMeta::new_readonly(*staker, true),
             AccountMeta::new_readonly(*validator_list_address, false),
         ],
-        data: StakePoolInstruction::SetPreferredValidator {
+        data: borsh::to_vec(&StakePoolInstruction::SetPreferredValidator {
             validator_type,
             validator_vote_address,
-        }
-        .try_to_vec()
+        })
         .unwrap(),
     }
 }
@@ -1363,6 +1358,10 @@ pub fn decrease_additional_validator_stake_with_vote(
 
 /// Creates `UpdateValidatorListBalance` instruction (update validator stake
 /// account balances)
+#[deprecated(
+    since = "1.1.0",
+    note = "please use `update_validator_list_balance_chunk`"
+)]
 pub fn update_validator_list_balance(
     program_id: &Pubkey,
     stake_pool: &Pubkey,
@@ -1414,13 +1413,120 @@ pub fn update_validator_list_balance(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::UpdateValidatorListBalance {
+        data: borsh::to_vec(&StakePoolInstruction::UpdateValidatorListBalance {
             start_index,
             no_merge,
-        }
-        .try_to_vec()
+        })
         .unwrap(),
     }
+}
+
+/// Creates an `UpdateValidatorListBalance` instruction (update validator stake
+/// account balances) to update `validator_list[start_index..start_index +
+/// len]`.
+///
+/// Returns `Err(ProgramError::InvalidInstructionData)` if:
+/// - `start_index..start_index + len` is out of bounds for
+///   `validator_list.validators`
+pub fn update_validator_list_balance_chunk(
+    program_id: &Pubkey,
+    stake_pool: &Pubkey,
+    stake_pool_withdraw_authority: &Pubkey,
+    validator_list_address: &Pubkey,
+    reserve_stake: &Pubkey,
+    validator_list: &ValidatorList,
+    len: usize,
+    start_index: usize,
+    no_merge: bool,
+) -> Result<Instruction, ProgramError> {
+    let mut accounts = vec![
+        AccountMeta::new_readonly(*stake_pool, false),
+        AccountMeta::new_readonly(*stake_pool_withdraw_authority, false),
+        AccountMeta::new(*validator_list_address, false),
+        AccountMeta::new(*reserve_stake, false),
+        AccountMeta::new_readonly(sysvar::clock::id(), false),
+        AccountMeta::new_readonly(sysvar::stake_history::id(), false),
+        AccountMeta::new_readonly(stake::program::id(), false),
+    ];
+    let validator_list_subslice = validator_list
+        .validators
+        .get(start_index..start_index.saturating_add(len))
+        .ok_or(ProgramError::InvalidInstructionData)?;
+    accounts.extend(validator_list_subslice.iter().flat_map(
+        |ValidatorStakeInfo {
+             vote_account_address,
+             validator_seed_suffix,
+             transient_seed_suffix,
+             ..
+         }| {
+            let (validator_stake_account, _) = find_stake_program_address(
+                program_id,
+                vote_account_address,
+                stake_pool,
+                NonZeroU32::new((*validator_seed_suffix).into()),
+            );
+            let (transient_stake_account, _) = find_transient_stake_program_address(
+                program_id,
+                vote_account_address,
+                stake_pool,
+                (*transient_seed_suffix).into(),
+            );
+            [
+                AccountMeta::new(validator_stake_account, false),
+                AccountMeta::new(transient_stake_account, false),
+            ]
+        },
+    ));
+    Ok(Instruction {
+        program_id: *program_id,
+        accounts,
+        data: borsh::to_vec(&StakePoolInstruction::UpdateValidatorListBalance {
+            start_index: start_index.try_into().unwrap(),
+            no_merge,
+        })
+        .unwrap(),
+    })
+}
+
+/// Creates `UpdateValidatorListBalance` instruction (update validator stake
+/// account balances)
+///
+/// Returns `None` if all validators in the given chunk has already been updated
+/// for this epoch, returns the required instruction otherwise.
+pub fn update_stale_validator_list_balance_chunk(
+    program_id: &Pubkey,
+    stake_pool: &Pubkey,
+    stake_pool_withdraw_authority: &Pubkey,
+    validator_list_address: &Pubkey,
+    reserve_stake: &Pubkey,
+    validator_list: &ValidatorList,
+    len: usize,
+    start_index: usize,
+    no_merge: bool,
+    current_epoch: Epoch,
+) -> Result<Option<Instruction>, ProgramError> {
+    let validator_list_subslice = validator_list
+        .validators
+        .get(start_index..start_index.saturating_add(len))
+        .ok_or(ProgramError::InvalidInstructionData)?;
+    if validator_list_subslice.iter().all(|info| {
+        let last_update_epoch: u64 = info.last_update_epoch.into();
+        last_update_epoch >= current_epoch
+    }) {
+        return Ok(None);
+    }
+    update_validator_list_balance_chunk(
+        program_id,
+        stake_pool,
+        stake_pool_withdraw_authority,
+        validator_list_address,
+        reserve_stake,
+        validator_list,
+        len,
+        start_index,
+        no_merge,
+    )
+    .map(Some)
 }
 
 /// Creates `UpdateStakePoolBalance` instruction (pool balance from the stake
@@ -1447,9 +1553,7 @@ pub fn update_stake_pool_balance(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::UpdateStakePoolBalance
-            .try_to_vec()
-            .unwrap(),
+        data: borsh::to_vec(&StakePoolInstruction::UpdateStakePoolBalance).unwrap(),
     }
 }
 
@@ -1467,9 +1571,7 @@ pub fn cleanup_removed_validator_entries(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::CleanupRemovedValidatorEntries
-            .try_to_vec()
-            .unwrap(),
+        data: borsh::to_vec(&StakePoolInstruction::CleanupRemovedValidatorEntries).unwrap(),
     }
 }
 
@@ -1482,31 +1584,88 @@ pub fn update_stake_pool(
     stake_pool_address: &Pubkey,
     no_merge: bool,
 ) -> (Vec<Instruction>, Vec<Instruction>) {
-    let vote_accounts: Vec<Pubkey> = validator_list
-        .validators
-        .iter()
-        .map(|item| item.vote_account_address)
-        .collect();
-
     let (withdraw_authority, _) =
         find_withdraw_authority_program_address(program_id, stake_pool_address);
 
-    let mut update_list_instructions: Vec<Instruction> = vec![];
-    let mut start_index = 0;
-    for accounts_chunk in vote_accounts.chunks(MAX_VALIDATORS_TO_UPDATE) {
-        update_list_instructions.push(update_validator_list_balance(
+    let update_list_instructions = validator_list
+        .validators
+        .chunks(MAX_VALIDATORS_TO_UPDATE)
+        .enumerate()
+        .map(|(i, chunk)| {
+            // unwrap-safety: chunk len and offset are derived
+            update_validator_list_balance_chunk(
+                program_id,
+                stake_pool_address,
+                &withdraw_authority,
+                &stake_pool.validator_list,
+                &stake_pool.reserve_stake,
+                validator_list,
+                chunk.len(),
+                i.saturating_mul(MAX_VALIDATORS_TO_UPDATE),
+                no_merge,
+            )
+            .unwrap()
+        })
+        .collect();
+
+    let final_instructions = vec![
+        update_stake_pool_balance(
             program_id,
             stake_pool_address,
             &withdraw_authority,
             &stake_pool.validator_list,
             &stake_pool.reserve_stake,
-            validator_list,
-            accounts_chunk,
-            start_index,
-            no_merge,
-        ));
-        start_index = start_index.saturating_add(MAX_VALIDATORS_TO_UPDATE as u32);
-    }
+            &stake_pool.manager_fee_account,
+            &stake_pool.pool_mint,
+            &stake_pool.token_program_id,
+        ),
+        cleanup_removed_validator_entries(
+            program_id,
+            stake_pool_address,
+            &stake_pool.validator_list,
+        ),
+    ];
+    (update_list_instructions, final_instructions)
+}
+
+/// Creates the `UpdateValidatorListBalance` instructions only for validators on
+/// `validator_list` that have not been updated for this epoch, and the
+/// `UpdateStakePoolBalance` instruction for fully updating the stake pool.
+///
+/// Basically same as [`update_stake_pool`], but skips validators that are
+/// already updated for this epoch
+pub fn update_stale_stake_pool(
+    program_id: &Pubkey,
+    stake_pool: &StakePool,
+    validator_list: &ValidatorList,
+    stake_pool_address: &Pubkey,
+    no_merge: bool,
+    current_epoch: Epoch,
+) -> (Vec<Instruction>, Vec<Instruction>) {
+    let (withdraw_authority, _) =
+        find_withdraw_authority_program_address(program_id, stake_pool_address);
+
+    let update_list_instructions = validator_list
+        .validators
+        .chunks(MAX_VALIDATORS_TO_UPDATE)
+        .enumerate()
+        .filter_map(|(i, chunk)| {
+            // unwrap-safety: chunk len and offset are derived
+            update_stale_validator_list_balance_chunk(
+                program_id,
+                stake_pool_address,
+                &withdraw_authority,
+                &stake_pool.validator_list,
+                &stake_pool.reserve_stake,
+                validator_list,
+                chunk.len(),
+                i.saturating_mul(MAX_VALIDATORS_TO_UPDATE),
+                no_merge,
+                current_epoch,
+            )
+            .unwrap()
+        })
+        .collect();
 
     let final_instructions = vec![
         update_stake_pool_balance(
@@ -1615,17 +1774,16 @@ fn deposit_stake_internal(
             Instruction {
                 program_id: *program_id,
                 accounts,
-                data: StakePoolInstruction::DepositStakeWithSlippage {
+                data: borsh::to_vec(&StakePoolInstruction::DepositStakeWithSlippage {
                     minimum_pool_tokens_out,
-                }
-                .try_to_vec()
+                })
                 .unwrap(),
             }
         } else {
             Instruction {
                 program_id: *program_id,
                 accounts,
-                data: StakePoolInstruction::DepositStake.try_to_vec().unwrap(),
+                data: borsh::to_vec(&StakePoolInstruction::DepositStake).unwrap(),
             }
         },
     );
@@ -1817,20 +1975,17 @@ fn deposit_sol_internal(
         Instruction {
             program_id: *program_id,
             accounts,
-            data: StakePoolInstruction::DepositSolWithSlippage {
+            data: borsh::to_vec(&StakePoolInstruction::DepositSolWithSlippage {
                 lamports_in,
                 minimum_pool_tokens_out,
-            }
-            .try_to_vec()
+            })
             .unwrap(),
         }
     } else {
         Instruction {
             program_id: *program_id,
             accounts,
-            data: StakePoolInstruction::DepositSol(lamports_in)
-                .try_to_vec()
-                .unwrap(),
+            data: borsh::to_vec(&StakePoolInstruction::DepositSol(lamports_in)).unwrap(),
         }
     }
 }
@@ -2002,20 +2157,17 @@ fn withdraw_stake_internal(
         Instruction {
             program_id: *program_id,
             accounts,
-            data: StakePoolInstruction::WithdrawStakeWithSlippage {
+            data: borsh::to_vec(&StakePoolInstruction::WithdrawStakeWithSlippage {
                 pool_tokens_in,
                 minimum_lamports_out,
-            }
-            .try_to_vec()
+            })
             .unwrap(),
         }
     } else {
         Instruction {
             program_id: *program_id,
             accounts,
-            data: StakePoolInstruction::WithdrawStake(pool_tokens_in)
-                .try_to_vec()
-                .unwrap(),
+            data: borsh::to_vec(&StakePoolInstruction::WithdrawStake(pool_tokens_in)).unwrap(),
         }
     }
 }
@@ -2125,20 +2277,17 @@ fn withdraw_sol_internal(
         Instruction {
             program_id: *program_id,
             accounts,
-            data: StakePoolInstruction::WithdrawSolWithSlippage {
+            data: borsh::to_vec(&StakePoolInstruction::WithdrawSolWithSlippage {
                 pool_tokens_in,
                 minimum_lamports_out,
-            }
-            .try_to_vec()
+            })
             .unwrap(),
         }
     } else {
         Instruction {
             program_id: *program_id,
             accounts,
-            data: StakePoolInstruction::WithdrawSol(pool_tokens_in)
-                .try_to_vec()
-                .unwrap(),
+            data: borsh::to_vec(&StakePoolInstruction::WithdrawSol(pool_tokens_in)).unwrap(),
         }
     }
 }
@@ -2294,7 +2443,7 @@ pub fn set_manager(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::SetManager.try_to_vec().unwrap(),
+        data: borsh::to_vec(&StakePoolInstruction::SetManager).unwrap(),
     }
 }
 
@@ -2312,7 +2461,7 @@ pub fn set_fee(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::SetFee { fee }.try_to_vec().unwrap(),
+        data: borsh::to_vec(&StakePoolInstruction::SetFee { fee }).unwrap(),
     }
 }
 
@@ -2331,7 +2480,7 @@ pub fn set_staker(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::SetStaker.try_to_vec().unwrap(),
+        data: borsh::to_vec(&StakePoolInstruction::SetStaker).unwrap(),
     }
 }
 
@@ -2353,9 +2502,7 @@ pub fn set_funding_authority(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::SetFundingAuthority(funding_type)
-            .try_to_vec()
-            .unwrap(),
+        data: borsh::to_vec(&StakePoolInstruction::SetFundingAuthority(funding_type)).unwrap(),
     }
 }
 
@@ -2385,8 +2532,7 @@ pub fn update_token_metadata(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::UpdateTokenMetadata { name, symbol, uri }
-            .try_to_vec()
+        data: borsh::to_vec(&StakePoolInstruction::UpdateTokenMetadata { name, symbol, uri })
             .unwrap(),
     }
 }
@@ -2421,8 +2567,7 @@ pub fn create_token_metadata(
     Instruction {
         program_id: *program_id,
         accounts,
-        data: StakePoolInstruction::CreateTokenMetadata { name, symbol, uri }
-            .try_to_vec()
+        data: borsh::to_vec(&StakePoolInstruction::CreateTokenMetadata { name, symbol, uri })
             .unwrap(),
     }
 }

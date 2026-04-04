@@ -19,7 +19,7 @@ use {
     borsh::BorshDeserialize,
     solana_program::{
         account_info::{next_account_info, AccountInfo},
-        borsh0_10::{get_packed_len, try_from_slice_unchecked},
+        borsh1::{get_packed_len, try_from_slice_unchecked},
         entrypoint::ProgramResult,
         msg,
         native_token::LAMPORTS_PER_SOL,
@@ -861,11 +861,6 @@ impl Processor {
             .checked_sub(pool_stake_state.delegation.stake)
             .and_then(|amount| amount.checked_sub(pool_stake_meta.rent_exempt_reserve))
             .ok_or(SinglePoolError::ArithmeticOverflow)?;
-
-        // sanity check: we have not somehow gone below the minimum
-        if post_pool_stake < minimum_delegation {
-            return Err(SinglePoolError::UnexpectedMathError.into());
-        }
 
         // sanity check: the user stake account is empty
         if user_stake_info.lamports() != 0 {

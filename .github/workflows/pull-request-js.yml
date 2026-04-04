@@ -32,6 +32,10 @@ on:
       - 'pnpm-lock.yaml'
       - '.github/workflows/pull-request-js.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   js-test:
     strategy:
@@ -62,7 +66,7 @@ jobs:
       - uses: pnpm/action-setup@v2
         with:
           version: 8
-      - uses: actions/cache@v3
+      - uses: actions/cache@v4
         with:
           path: ~/.npm
           key: node-${{ hashFiles('pnpm-lock.yaml') }}
